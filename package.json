@@ -3,12 +3,16 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
-  "engines": { "node": "20.x" },
-  "scripts": { "start": "node server.js" },
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "@slack/web-api": "^7",
-    "dotenv": "^16",
-    "express": "^4",
-    "express-basic-auth": "^1"
+    "@slack/web-api": "^7.10.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-basic-auth": "^1.2.1"
   }
 }
