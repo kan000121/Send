@@ -1,0 +1,8 @@
+# 環境変数・秘密情報
+.env
+
+# Node
+node_modules
+npm-debug.log*
+.yarn/*
+.DS_Store

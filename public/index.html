@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Slack 一斉送信（テキスト＋リモートファイル＋DM対応）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; }
+    .list { max-height: 300px; overflow: auto; border: 1px solid #ddd; padding: 8px; }
+    label { display: block; padding: 4px 0; }
+    input[type="text"], textarea { width: 100%; padding: 6px; margin: 6px 0 12px; }
+    button { padding: 8px 14px; cursor: pointer; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    h2, h3 { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h2>Slack 一斉送信（毎回選択／DM対応）</h2>
+
+  <label>メッセージ本文（任意・テキストのみでも送信可）</label>
+  <textarea id="message" rows="4" placeholder="ここに本文（改行OK）"></textarea>
+
+  <div class="row">
+    <label><input type="radio" name="mode" value="text" checked> テキストのみ</label>
+    <label><input type="radio" name="mode" value="file"> ファイルのみ</label>
+    <label><input type="radio" name="mode" value="both"> テキスト＋ファイル</label>
+  </div>
+
+  <label>ファイルURL（S3/SharePoint 等、モードが file/both のとき必須）</label>
+  <input id="fileUrl" type="text" placeholder="https://example.com/path/to/file.pdf" />
+
+  <label>ファイルタイトル（任意）</label>
+  <input id="title" type="text" placeholder="資料タイトル" />
+
+  <div class="row">
+    <input id="filter" type="text" placeholder="チャンネル名で絞り込み" />
+    <label><input type="checkbox" id="selectAll" /> CH 全選択/解除</label>
+    <label><input type="checkbox" id="autoJoin" checked /> 公開CHに未参加なら自動参加</label>
+  </div>
+
+  <h3>送信先チャンネル（複数選択）</h3>
+  <div class="list" id="channels"></div>
+
+  <h3>DM 宛先ユーザー（任意・複数選択）</h3>
+  <div class="row">
+    <input id="userFilter" type="text" placeholder="ユーザー名で絞り込み" />
+    <label><input type="checkbox" id="selectAllUsers" /> ユーザー全選択/解除</label>
+  </div>
+  <div class="list" id="users"></div>
+
+  <p><button id="sendBtn">送信</button></p>
+  <pre id="out"></pre>
+
+  <script>
+    const listEl = document.getElementById("channels");
+    const usersEl = document.getElementById("users");
+    const out = document.getElementById("out");
+    const filterInput = document.getElementById("filter");
+    const userFilter = document.getElementById("userFilter");
+    const selectAll = document.getElementById("selectAll");
+    const selectAllUsers = document.getElementById("selectAllUsers");
+    const autoJoin = document.getElementById("autoJoin");
+    let allChannels = [];
+    let allUsers = [];
+
+    // ---- チャンネル ----
+    async function loadChannels() {
+      const r = await fetch("/api/channels");
+      const data = await r.json();
+      allChannels = data;
+      renderChannels(allChannels);
+      restoreSelection("selectedChannels", listEl);
+    }
+    function renderChannels(items) {
+      const saved = new Set(JSON.parse(localStorage.getItem("selectedChannels") || "[]"));
+      listEl.innerHTML = "";
+      items.forEach(c => {
+        const id = `ch-${c.id}`;
+        const label = document.createElement("label");
+        const checked = saved.has(c.id) ? "checked" : "";
+        label.innerHTML = `
+          <input type="checkbox" id="${id}" value="${c.id}" ${checked}/>
+          ${c.name} <small>(${c.id}${c.is_private ? ", private" : ""})</small>
+        `;
+        listEl.appendChild(label);
+      });
+    }
+    filterInput.addEventListener("input", () => {
+      const q = filterInput.value.trim().toLowerCase();
+      const filtered = allChannels.filter(c => (c.name || "").toLowerCase().includes(q));
+      renderChannels(filtered);
+    });
+    selectAll.addEventListener("change", () => {
+      listEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = selectAll.checked);
+    });
+
+    // ---- ユーザー（DM）----
+    async function loadUsers() {
+      const r = await fetch("/api/users");
+      const data = await r.json();
+      allUsers = data;
+      renderUsers(allUsers);
+      restoreSelection("selectedUsers", usersEl);
+    }
+    function renderUsers(items) {
+      const saved = new Set(JSON.parse(localStorage.getItem("selectedUsers") || "[]"));
+      usersEl.innerHTML = "";
+      items.forEach(u => {
+        const id = `u-${u.id}`;
+        const label = document.createElement("label");
+        const checked = saved.has(u.id) ? "checked" : "";
+        label.innerHTML = `
+          <input type="checkbox" id="${id}" value="${u.id}" ${checked}/>
+          ${u.name} <small>(${u.id})</small>
+        `;
+        usersEl.appendChild(label);
+      });
+    }
+    userFilter.addEventListener("input", () => {
+      const q = userFilter.value.trim().toLowerCase();
+      const filtered = allUsers.filter(u => (u.name || "").toLowerCase().includes(q));
+      renderUsers(filtered);
+    });
+    selectAllUsers.addEventListener("change", () => {
+      usersEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = selectAllUsers.checked);
+    });
+
+    // ---- 送信 ----
+    document.getElementById("sendBtn").onclick = async () => {
+      const mode = (document.querySelector("input[name=mode]:checked") || {}).value || "text";
+      const message = document.getElementById("message").value;
+      const fileUrl = document.getElementById("fileUrl").value.trim();
+      const title = document.getElementById("title").value.trim();
+
+      const chChecked = listEl.querySelectorAll("input[type=checkbox]:checked");
+      const channelIds = Array.from(chChecked).map(cb => cb.value);
+
+      const uChecked = usersEl.querySelectorAll("input[type=checkbox]:checked");
+      const userIds = Array.from(uChecked).map(cb => cb.value);
+
+      if ((mode === "file" || mode === "both") && !fileUrl) {
+        out.textContent = "ファイルURLが必要です。";
+        return;
+      }
+      if (channelIds.length === 0 && userIds.length === 0) {
+        out.textContent = "送信先（チャンネルまたはユーザー）を選択してください。";
+        return;
+      }
+
+      // 前回選択を保存
+      localStorage.setItem("selectedChannels", JSON.stringify(channelIds));
+      localStorage.setItem("selectedUsers", JSON.stringify(userIds));
+
+      out.textContent = "送信中...";
+      const r = await fetch("/api/broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode, fileUrl, title, message,
+          channelIds, userIds,
+          autoJoinPublic: autoJoin.checked
+        })
+      });
+      const data = await r.json();
+      out.textContent = JSON.stringify(data, null, 2);
+    };
+
+    function restoreSelection(key, rootEl) {
+      const saved = new Set(JSON.parse(localStorage.getItem(key) || "[]"));
+      rootEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = saved.has(cb.value));
+    }
+
+    // 初期ロード
+    loadChannels();
+    loadUsers();
+  </script>
+</body>
+</html>
