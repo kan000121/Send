@@ -10,9 +10,12 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.887.0",
+    "@aws-sdk/s3-request-presigner": "^3.887.0",
     "@slack/web-api": "^7.10.0",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
-    "express-basic-auth": "^1.2.1"
+    "express-basic-auth": "^1.2.1",
+    "multer": "^2.0.2"
   }
 }
