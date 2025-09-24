@@ -2,6 +2,10 @@
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import dotenv from "dotenv";
+import multer from "multer";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
 dotenv.config();
 
 const app = express();
@@ -9,6 +13,12 @@ app.use(express.json());
 app.use(express.static("public"));
 
 const client = new WebClient(process.env.SLACK_BOT_TOKEN);
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB 例
+});
+
 
 // 軽いウェイト（429対策）
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -76,6 +86,92 @@ app.get("/api/users", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "users_list_failed" });
+  }
+});
+// D&Dファイルを受け取って一括共有
+app.post("/api/upload-share", upload.single("file"), async (req, res) => {
+  try {
+    const file = req.file;
+    const title = req.body?.title || (file?.originalname ?? "uploaded file");
+    const message = req.body?.message || "";
+    const channelIds = JSON.parse(req.body?.channelIds || "[]"); // ["Cxxx","Gyyy"]
+    const userIds    = JSON.parse(req.body?.userIds || "[]");    // ["Uxxx","Uyyy"]
+    const autoJoinPublic = String(req.body?.autoJoinPublic ?? "true") === "true";
+
+    if (!file) return res.status(400).json({ ok:false, error:"no_file" });
+    if (channelIds.length === 0 && userIds.length === 0) {
+      return res.status(400).json({ ok:false, error:"no_targets" });
+    }
+
+    // 0) DM をチャンネルIDに変換
+    const targets = [...channelIds];
+    for (const uid of userIds) {
+      try {
+        const dm = await client.conversations.open({ users: uid }); // im:write
+        if (dm.ok && dm.channel?.id) targets.push(dm.channel.id);
+      } catch (e) {
+        console.warn("openDm failed:", uid, e?.message || e);
+      }
+    }
+
+    // 1) S3にアップロード
+    const key = `${process.env.S3_PREFIX || ""}${Date.now()}_${encodeURIComponent(file.originalname)}`;
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      // 公開バケット運用なら ACL は不要。必要に応じて:
+      // ACL: "public-read",
+    }));
+
+    // 2) Slackが参照するURLを組み立て（署名URL or 公開URL）
+    let externalUrl;
+    if (process.env.S3_PUBLIC_BASE_URL) {
+      const base = process.env.S3_PUBLIC_BASE_URL.replace(/\/+$/,"");
+      externalUrl = `${base}/${key}`;
+    } else {
+      // 署名URL（既定）。クリック時に有効であればOK
+      const expires = Number(process.env.S3_URL_EXPIRES || 3600);
+      externalUrl = await getSignedUrl(
+        s3,
+        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key }),
+        { expiresIn: expires }
+      );
+    }
+
+    // 3) Remote File として一度だけ登録
+    const add = await client.files.remote.add({
+      external_id: key,        // 任意の一意ID（keyを使う）
+      external_url: externalUrl,
+      title,
+      // filetype は省略可。検索用に本文を入れたいなら indexable_file_contents も可
+    });
+    if (!add.ok) return res.status(500).json(add);
+
+    // 4) 宛先ごとに共有（＋必要ならテキストも投稿）
+    const results = [];
+    for (const ch of targets) {
+      try {
+        if (autoJoinPublic) await joinIfPublic(client, ch); // 公開CHなら参加を試みる
+        const shared = await client.files.remote.share({
+          external_id: key,
+          channels: ch,
+        });
+        if (message) {
+          await client.chat.postMessage({ channel: ch, text: message }); // 任意の本文
+        }
+        results.push({ channel: ch, ok: shared.ok, error: shared.error || null });
+      } catch (e) {
+        results.push({ channel: ch, ok: false, error: String(e) });
+      }
+      await sleep(250);
+    }
+
+    res.json({ ok:true, externalUrl, title, count: targets.length, results });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok:false, error: e?.message || "upload_share_failed" });
   }
 });
 
