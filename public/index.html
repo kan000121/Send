@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>Slack 一斉送信（チャンネル別メンション／DM対応）</title>
+  <title>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し・履歴）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
@@ -32,6 +32,24 @@
     .suggest-item { padding:8px 10px; cursor:pointer; }
     .suggest-item:hover { background:#f5f7fb; }
     .suggest-id { color:#999; font-size:12px; margin-left:6px; }
+
+    /* modals */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; align-items: center; justify-content: center; padding: 20px; z-index: 100; }
+    .modal { width: min(960px, 95vw); max-height: 90vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+    .modal header { padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 700; display:flex; justify-content: space-between; align-items:center; }
+    .modal .body { padding: 16px 18px; display: grid; grid-template-columns: 1fr; gap: 16px; }
+    .modal footer { padding: 14px 18px; border-top: 1px solid #eee; display:flex; gap: 10px; justify-content: flex-end; }
+    .muted { color:#666; font-size:13px; }
+    .table { border:1px solid #e5e5e5; border-radius: 10px; overflow: hidden; }
+    .table table { width:100%; border-collapse: collapse; }
+    .table th, .table td { padding: 8px 10px; border-bottom: 1px solid #f2f2f2; text-align: left; vertical-align: top; }
+    .codebox { background:#1111; border:1px solid #e5e5e5; border-radius:10px; padding:10px; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .btn-secondary { background:#f2f4f8; color:#333; }
+    .pill-small { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
+    .history-item { border:1px solid #eee; border-radius:10px; padding:10px; display:flex; gap:12px; align-items:flex-start; }
+    .history-meta { flex:1; }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+    .chip { padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
   </style>
 </head>
 <body>
@@ -81,15 +99,72 @@
     </section>
   </div>
 
-  <!-- 送信 -->
-  <div class="section">
-    <button id="sendBtn">送信</button>
+  <!-- 送信/取り消し/履歴 -->
+  <div class="section" style="display:flex; gap:10px; align-items:center;">
+    <button id="sendBtn" type="button">送信</button>
+    <button id="undoBtn" type="button" disabled>直前の送信を取り消す</button>
+    <button id="historyBtn" type="button" class="btn-secondary">履歴</button>
+    <span id="lastId" class="tiny"></span>
   </div>
 
-  <!-- 結果 -->
+  <!-- レスポンス -->
   <div class="section">
     <h3>レスポンス</h3>
     <pre id="out"></pre>
+  </div>
+
+  <!-- 送信前確認モーダル -->
+  <div id="confirmModal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header>
+        <span>送信前の最終確認</span>
+        <span id="closeModal" class="muted" style="cursor:pointer;">閉じる ✕</span>
+      </header>
+      <div class="body">
+        <div class="table">
+          <table>
+            <thead>
+              <tr><th style="width:36%;">チャンネル（メンション）</th><th>DM 宛先ユーザー</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="previewChannels"></td>
+                <td id="previewDMs"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div class="muted">本文プレビュー</div>
+          <div id="previewMessage" class="codebox"></div>
+        </div>
+        <div>
+          <div class="muted">案件概要プレビュー（スレッド返信・コードブロック）</div>
+          <div id="previewSummary" class="codebox"></div>
+        </div>
+      </div>
+      <footer>
+        <button id="backBtn" type="button" class="btn-secondary">戻る</button>
+        <button id="confirmSendBtn" type="button">送信する</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 履歴モーダル -->
+  <div id="historyModal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header>
+        <span>送信履歴</span>
+        <span id="closeHistory" class="muted" style="cursor:pointer;">閉じる ✕</span>
+      </header>
+      <div class="body" id="historyBody">
+        <!-- 動的に一覧を埋める -->
+      </div>
+      <footer>
+        <button id="historyReload" type="button" class="btn-secondary">再読み込み</button>
+        <button id="historyCloseBtn" type="button">閉じる</button>
+      </footer>
+    </div>
   </div>
 
   <script>
@@ -100,6 +175,27 @@
     const userFilter = document.getElementById("userFilter");
     const selectAll = document.getElementById("selectAll");
     const selectAllUsers = document.getElementById("selectAllUsers");
+    const undoBtn = document.getElementById("undoBtn");
+    const lastIdEl = document.getElementById("lastId");
+    const historyBtn = document.getElementById("historyBtn");
+
+    // confirm modal refs
+    const modal = document.getElementById("confirmModal");
+    const closeModal = document.getElementById("closeModal");
+    const backBtn = document.getElementById("backBtn");
+    const confirmSendBtn = document.getElementById("confirmSendBtn");
+    const previewChannels = document.getElementById("previewChannels");
+    const previewDMs = document.getElementById("previewDMs");
+    const previewMessage = document.getElementById("previewMessage");
+    const previewSummary = document.getElementById("previewSummary");
+
+    // history modal refs
+    const historyModal = document.getElementById("historyModal");
+    const historyBody = document.getElementById("historyBody");
+    const historyClose = document.getElementById("closeHistory");
+    const historyCloseBtn = document.getElementById("historyCloseBtn");
+    const historyReload = document.getElementById("historyReload");
+
     let allChannels = [];
     let allUsers = [];
 
@@ -124,7 +220,6 @@
       renderChannels(allChannels);
       restoreSelection("selectedChannels", listEl);
     }
-
     function renderChannels(items) {
       const saved = new Set(JSON.parse(localStorage.getItem("selectedChannels") || "[]"));
       listEl.innerHTML = "";
@@ -165,7 +260,6 @@
         cb.addEventListener("change", async () => {
           if (cb.checked) {
             mention.style.display = "flex";
-            // 既に状態がなければデフォルト @channel
             if (!perChannelMentions.get(c.id)) {
               perChannelMentions.set(c.id, { mode:"channel" });
               mention.querySelector(`input[value="channel"]`).checked = true;
@@ -179,7 +273,7 @@
           }
         });
 
-        // ラジオ切替（ユーザー＝そのCHのメンバーから選ぶ）
+        // ラジオ切替（ユーザー指定はCHメンバーから）
         mention.addEventListener("change", async (e) => {
           if (e.target.name === `m-${c.id}`) {
             const mode = e.target.value;
@@ -187,7 +281,7 @@
             const suggest = mention.querySelector(".suggest");
             if (mode === "user") {
               input.disabled = false; input.readOnly = false; input.focus();
-              ok.textContent = ""; // ユーザー未選択
+              ok.textContent = "";
               if (!channelMembersCache.has(c.id)) await fetchChannelMembers(c.id);
               showMemberSuggestions(c.id, "", input, suggest, ok); // 全員を表示
             } else {
@@ -208,12 +302,10 @@
           if (!channelMembersCache.has(c.id)) await fetchChannelMembers(c.id);
           showMemberSuggestions(c.id, (input.value || "").trim().toLowerCase(), input, suggest, ok);
         });
-
         input.addEventListener("input", async () => {
           const q = input.value.trim().toLowerCase();
           showMemberSuggestions(c.id, q, input, suggest, ok);
         });
-
         input.addEventListener("blur", () => setTimeout(()=>suggest.style.display="none",150));
 
         row.appendChild(cb);
@@ -222,7 +314,6 @@
         row.appendChild(mention);
         listEl.appendChild(row);
 
-        // 初期チェック済みならUI表示
         if (cb.checked) {
           mention.style.display = "flex";
           const m = perChannelMentions.get(c.id) || { mode:"channel" };
@@ -233,7 +324,7 @@
       });
     }
 
-    // チャンネルメンバー候補を表示・クリック確定
+    // そのCHのメンバー候補一覧を表示/確定
     function showMemberSuggestions(chId, q, inputEl, suggestEl, okEl) {
       const members = channelMembersCache.get(chId) || [];
       const list = (!q ? members : members.filter(m => (m.name||"").toLowerCase().includes(q))).slice(0, 100);
@@ -299,9 +390,8 @@
       usersEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = selectAllUsers.checked);
     });
 
-    /* ---- 送信 ---- */
+    /* ---- 送信前確認 → 送信 ---- */
     document.getElementById("sendBtn").onclick = async () => {
-      const btn = document.getElementById("sendBtn");
       const message = document.getElementById("message").value;
       const summary = document.getElementById("summary").value;
 
@@ -312,8 +402,6 @@
 
       if (!message.trim()) { out.textContent = "本文を入力してください。"; return; }
       if (channelIds.length === 0 && userIds.length === 0) { out.textContent = "送信先を選択してください。"; return; }
-
-      // 全チャンネルにメンション設定があるか
       for (const ch of channelIds) {
         const m = perChannelMentions.get(ch);
         if (!m || !m.mode || (m.mode === "user" && !m.userId)) {
@@ -322,16 +410,55 @@
         }
       }
 
-      // Map -> プレーンオブジェクト
-      const perChannelMentionsObj = {};
-      for (const [k, v] of perChannelMentions.entries()) perChannelMentionsObj[k] = v;
+      // プレビュー
+      previewChannels.innerHTML = renderPreviewChannels(channelIds);
+      previewDMs.innerHTML = renderPreviewDMs(userIds);
+      previewMessage.textContent = message;
+      previewSummary.textContent = summary || "(なし)";
+      openModal();
+    };
 
-      localStorage.setItem("selectedChannels", JSON.stringify(channelIds));
-      localStorage.setItem("selectedUsers", JSON.stringify(userIds));
+    function renderPreviewChannels(ids) {
+      if (!ids.length) return "<span class='muted'>(なし)</span>";
+      const rows = ids.map(id => {
+        const ch = allChannels.find(c => c.id === id);
+        const name = ch ? ch.name : id;
+        const m = perChannelMentions.get(id);
+        const mentionLabel =
+          m.mode === "user"
+            ? `<span class="pill-small">${escapeHtml(m.userName || m.userId)}</span>`
+            : `<span class="pill-small">@${m.mode}</span>`;
+        return `<div>• #${escapeHtml(name)} ${mentionLabel}</div>`;
+      });
+      return rows.join("");
+    }
+    function renderPreviewDMs(ids) {
+      if (!ids.length) return "<span class='muted'>(なし)</span>";
+      const rows = ids.map(id => {
+        const u = allUsers.find(x => x.id === id);
+        return `<div>• ${escapeHtml(u ? u.name : id)}</div>`;
+      });
+      return rows.join("");
+    }
 
-      btn.disabled = true;
+    function openModal(){ modal.style.display = "flex"; }
+    function closeModalFn(){ modal.style.display = "none"; }
+    closeModal.onclick = backBtn.onclick = closeModalFn;
+
+    confirmSendBtn.onclick = async () => {
+      confirmSendBtn.disabled = true;
       out.textContent = "送信中...";
       try {
+        const message = document.getElementById("message").value;
+        const summary = document.getElementById("summary").value;
+        const chChecked = listEl.querySelectorAll('input[type="checkbox"]:checked');
+        const channelIds = Array.from(chChecked).map(cb => cb.value);
+        const uChecked = usersEl.querySelectorAll('input[type="checkbox"]:checked');
+        const userIds = Array.from(uChecked).map(cb => cb.value);
+
+        const perChannelMentionsObj = {};
+        for (const [k, v] of perChannelMentions.entries()) perChannelMentionsObj[k] = v;
+
         const r = await fetch("/api/broadcast", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -344,20 +471,130 @@
             perChannelMentions: perChannelMentionsObj
           })
         });
-        out.textContent = JSON.stringify(await r.json(), null, 2);
+        const resp = await r.json();
+        out.textContent = JSON.stringify(resp, null, 2);
+
+        if (resp.ok) {
+          undoBtn.disabled = false;
+          lastIdEl.textContent = resp.broadcast_id ? `ID: ${resp.broadcast_id}` : "";
+        }
+        closeModalFn();
       } catch (e) {
         out.textContent = "送信に失敗しました: " + e;
       } finally {
-        btn.disabled = false;
+        confirmSendBtn.disabled = false;
       }
     };
+
+    /* ---- 取り消し（直前） ---- */
+    undoBtn.onclick = async () => {
+      undoBtn.disabled = true;
+      out.textContent = "取り消し中...";
+      try {
+        const ur = await fetch("/api/broadcast/undo-last", { method: "POST" });
+        const uj = await ur.json();
+        out.textContent = JSON.stringify(uj, null, 2);
+        if (uj.ok) { lastIdEl.textContent = ""; }
+      } catch (e) {
+        out.textContent = "取り消しに失敗しました: " + e;
+      }
+    };
+
+    /* ---- 履歴モーダル ---- */
+    historyBtn.onclick = async () => { await loadHistory(); openHistory(); };
+    historyReload.onclick = async () => { await loadHistory(true); };
+    historyClose.onclick = historyCloseBtn.onclick = () => historyModal.style.display = "none";
+
+    function openHistory(){ historyModal.style.display = "flex"; }
+
+    async function loadHistory(force) {
+      // チャンネル名解決のために最新allChannelsが必要
+      if (!allChannels.length || force) await loadChannels();
+
+      historyBody.innerHTML = "読み込み中...";
+      try {
+        const r = await fetch("/api/broadcast/history?limit=50");
+        const data = await r.json();
+        if (!data.ok) throw new Error("failed to fetch history");
+
+        const mapName = new Map(allChannels.map(c => [c.id, c.name]));
+        historyBody.innerHTML = "";
+
+        if (!data.history.length) {
+          historyBody.innerHTML = `<div class="muted">履歴はまだありません。</div>`;
+          return;
+        }
+
+        data.history.forEach(item => {
+          const wrap = document.createElement("div");
+          wrap.className = "history-item";
+
+          const meta = document.createElement("div");
+          meta.className = "history-meta";
+          const dt = new Date(item.createdAt);
+          const title = document.createElement("div");
+          title.innerHTML = `<b>ID:</b> ${item.id}　<b>日時:</b> ${fmt(dt)}　<b>宛先:</b> ${item.count} 件`;
+          const preview = document.createElement("div");
+          preview.className = "muted";
+          preview.textContent = item.messagePreview || "";
+
+          const chips = document.createElement("div");
+          chips.className = "chips";
+          (item.channels || []).slice(0, 12).forEach(cid => {
+            const chip = document.createElement("span");
+            chip.className = "chip";
+            chip.textContent = `#${mapName.get(cid) || cid}`;
+            chips.appendChild(chip);
+          });
+          if ((item.channels || []).length > 12) {
+            const chip = document.createElement("span");
+            chip.className = "chip";
+            chip.textContent = `＋${(item.channels.length - 12)}`;
+            chips.appendChild(chip);
+          }
+
+          meta.appendChild(title);
+          meta.appendChild(preview);
+          meta.appendChild(chips);
+
+          const actions = document.createElement("div");
+          const btn = document.createElement("button");
+          btn.textContent = "この送信を取り消す";
+          btn.onclick = async () => {
+            btn.disabled = true;
+            try {
+              const r = await fetch(`/api/broadcast/${encodeURIComponent(item.id)}/undo`, { method: "POST" });
+              const j = await r.json();
+              out.textContent = JSON.stringify(j, null, 2);
+              if (j.ok) {
+                // UI上も消しておく
+                wrap.remove();
+              } else {
+                btn.disabled = false;
+              }
+            } catch {
+              btn.disabled = false;
+            }
+          };
+          actions.appendChild(btn);
+
+          wrap.appendChild(meta);
+          wrap.appendChild(actions);
+          historyBody.appendChild(wrap);
+        });
+      } catch (e) {
+        historyBody.innerHTML = `<div class="muted">履歴の取得に失敗しました。</div>`;
+      }
+    }
+
+    function fmt(d){ const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 
     /* ---- 共通 ---- */
     function restoreSelection(key, rootEl) {
       const saved = new Set(JSON.parse(localStorage.getItem(key) || "[]"));
       rootEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = saved.has(cb.value));
     }
-    function escapeHtml(s=""){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+    function escapeHtml(s=""){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
     // 初期ロード
     loadChannels();
