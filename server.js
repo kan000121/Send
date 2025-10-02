@@ -1,429 +1,365 @@
-// server.js — DB永続化版（SQLite）
-// 一斉送信（チャンネル別メンション/DM）+ 確認UI + 履歴API + 取り消し（直前/ID指定）
-// 案件概要はスレッド返信(コードブロック) / Slack内［削除］ボタン / DB保存
+// server.js
+import path from "node:path";
+import fs from "node:fs";
 import express from "express";
-import basicAuth from "express-basic-auth";
-import { WebClient } from "@slack/web-api";
 import dotenv from "dotenv";
-import crypto from "crypto";
-import Database from "better-sqlite3";
+import { WebClient } from "@slack/web-api";
+
 dotenv.config();
 
-
-
-const SHOW_DELETE_BUTTON = String(process.env.SHOW_DELETE_BUTTON || "true").toLowerCase() === "true";
 const app = express();
+const PORT = process.env.PORT || 3000;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN; // xoxb-***
+const TEAM_ID_ENV = process.env.TEAM_ID || "";       // 任意（固定なら入れる）
+
+if (!SLACK_BOT_TOKEN) {
+  console.warn("[WARN] SLACK_BOT_TOKEN(.env) が未設定です。ボット送信/一覧は動きません。");
+}
+
+const bot = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
+
+// ------------------------------------
+// middlewares
+// ------------------------------------
 app.use(express.json({ limit: "2mb" }));
-app.use(express.static("public"));
+app.use(express.urlencoded({ extended: true }));
 
-/* ===== Basic 認証（任意） ===== */
-const { BASIC_USER, BASIC_PASS } = process.env;
-if (BASIC_USER && BASIC_PASS) {
-  app.use(
-    basicAuth({
-      users: { [BASIC_USER]: BASIC_PASS },
-      challenge: true,
-      realm: "SendSlack",
-    })
-  );
+// CORSが必要ならここで適宜
+// app.use((req,res,next)=>{ res.setHeader("Access-Control-Allow-Origin","*"); ... })
+
+// 直近送信の保存（取り消し用）
+let lastBroadcast = null; // { results:[{channel,ts,mode,token}], mode }
+
+// ------------------------------------
+// helpers
+// ------------------------------------
+function pickTeamIdFallback(teamIdFromClient) {
+  // 優先：クライアントから来た teamId → .env → 未指定
+  return teamIdFromClient || TEAM_ID_ENV || undefined;
 }
 
-/* ===== Slack ===== */
-const client = new WebClient(process.env.SLACK_BOT_TOKEN);
-// 必要スコープ: chat:write, channels:read, users:read, im:write
-// 追加: groups:read（プラベCH）, channels:join（公開CH自動参加）
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/* ===== SQLite 初期化 ===== */
-const db = new Database("data.db");
-db.pragma("journal_mode = WAL");
-db.exec(`
-CREATE TABLE IF NOT EXISTS broadcasts (
-  id TEXT,                -- 送信回を識別するID（同じidで複数行＝複数宛先）
-  channel TEXT,           -- 送信先チャンネル/IM ID
-  main_ts TEXT,           -- 本文メッセージ ts
-  summary_ts TEXT,        -- 案件概要の返信 ts（なければNULL）
-  created_at INTEGER,     -- ミリ秒
-  message_preview TEXT    -- 本文の先頭160字
-);
-CREATE INDEX IF NOT EXISTS idx_broadcasts_id ON broadcasts(id);
-CREATE INDEX IF NOT EXISTS idx_broadcasts_created ON broadcasts(created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_broadcasts_main_ts ON broadcasts(main_ts);
-`);
-
-const stmtInsert = db.prepare(
-  "INSERT OR REPLACE INTO broadcasts (id, channel, main_ts, summary_ts, created_at, message_preview) VALUES (?, ?, ?, ?, ?, ?)"
-);
-const stmtSelectGroupPage = db.prepare(`
-  SELECT id,
-         MIN(created_at) AS created_at,
-         COUNT(*)        AS count,
-         GROUP_CONCAT(channel) AS channels,
-         MAX(message_preview)  AS message_preview
-  FROM broadcasts
-  GROUP BY id
-  ORDER BY created_at DESC
-  LIMIT ? OFFSET ?
-`);
-const stmtSelectLatestId = db.prepare(`
-  SELECT id
-  FROM broadcasts
-  GROUP BY id
-  ORDER BY MAX(created_at) DESC
-  LIMIT 1
-`);
-const stmtSelectById = db.prepare(`SELECT * FROM broadcasts WHERE id = ?`);
-const stmtDeleteById = db.prepare(`DELETE FROM broadcasts WHERE id = ?`);
-const stmtDeleteByMainTs = db.prepare(`DELETE FROM broadcasts WHERE main_ts = ?`);
-
-/* ===== 小物 ===== */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const isChannelId = (id) => id?.startsWith("C") || id?.startsWith("G"); // C=public, G=private
-const newBroadcastId = () => "b" + Date.now() + Math.random().toString(36).slice(2, 8);
-
-async function joinIfPublic(client, channel) {
-  try {
-    const info = await client.conversations.info({ channel });
-    if (!info.channel?.is_private) await client.conversations.join({ channel });
-  } catch {/* 既参加/権限不足は無視 */}
-}
-
-/* 文字列抽出 → コードブロック */
-const extractText = (x) => {
-  if (x == null) return "";
-  if (typeof x === "string") return x;
-  if (Array.isArray(x)) return x.map(extractText).filter(Boolean).join("\n");
-  if (typeof x === "object") {
-    const cands = [x.plain_text, x.text, x.content, x.value, x.body, x.message, x.description, x.title]
-      .filter((v) => typeof v === "string" && v.trim());
-    if (cands.length) return cands[0];
-    try { return JSON.stringify(x, null, 2); } catch { return String(x); }
+function buildTextWithMention(baseText, mentionPlan) {
+  // mentionPlan = {mode: "channel"|"here"|"everyone"|"user", userId?, userName?}
+  if (!mentionPlan || !mentionPlan.mode) return baseText;
+  switch (mentionPlan.mode) {
+    case "channel":   return `<!channel> ${baseText}`;
+    case "here":      return `<!here> ${baseText}`;
+    case "everyone":  return `<!everyone> ${baseText}`;
+    case "user":
+      if (mentionPlan.userId) return `<@${mentionPlan.userId}> ${baseText}`;
+      return baseText;
+    default: return baseText;
   }
-  return String(x);
-};
-const toCodeBlock = (x) => {
-  const s = extractText(x);
-  if (!s || !s.trim()) return "";
-  const safe = s.replace(/```/g, "\u200B```"); // 入れ子対策
-  return "```\n" + safe + "\n```";
-};
+}
 
-/* ===== API: チャンネル一覧 ===== */
-app.get("/api/channels", async (_req, res) => {
+function safeJson(res, payload, status = 200) {
+  res.status(status).json(payload);
+}
+
+// ------------------------------------
+// API: ボットの見えるチャンネル一覧（public/招待済みprivate）
+// ------------------------------------
+app.get("/api/channels", async (req, res, next) => {
   try {
-    const types = "public_channel,private_channel";
-    const channels = [];
+    if (!bot) return safeJson(res, [], 200);
+
+    const out = [];
     let cursor;
     do {
-      const r = await client.conversations.list({ types, limit: 200, cursor });
-      channels.push(...(r.channels || []));
-      cursor = r.response_metadata?.next_cursor;
+      const resp = await bot.conversations.list({
+        limit: 1000,
+        cursor,
+        types: "public_channel,private_channel"
+      });
+      (resp.channels || []).forEach(c => {
+        out.push({ id: c.id, name: c.name, is_private: !!c.is_private });
+      });
+      cursor = resp.response_metadata?.next_cursor;
     } while (cursor);
-
-    res.json(
-      channels.map((c) => ({
-        id: c.id,
-        name: c.name || c.user || c.id,
-        is_private: !!c.is_private,
-      }))
-    );
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "channels_list_failed" });
-  }
+    safeJson(res, out);
+  } catch (e) { next(e); }
 });
 
-/* ===== API: ユーザー一覧（DM候補） ===== */
-app.get("/api/users", async (_req, res) => {
+// ------------------------------------
+// API: ワークスペースのユーザー一覧（DM向け）
+// ------------------------------------
+app.get("/api/users", async (req, res, next) => {
   try {
+    if (!bot) return safeJson(res, [], 200);
     const users = [];
     let cursor;
     do {
-      const r = await client.users.list({ limit: 200, cursor });
-      users.push(...(r.members || []));
-      cursor = r.response_metadata?.next_cursor;
+      const resp = await bot.users.list({ limit: 1000, cursor });
+      (resp.members || [])
+        .filter(u => !u.deleted && !u.is_bot)
+        .forEach(u => users.push({ id: u.id, name: u.profile?.real_name || u.name || u.id }));
+      cursor = resp.response_metadata?.next_cursor;
     } while (cursor);
-
-    res.json(
-      users
-        .filter((u) => !u.deleted && !u.is_bot)
-        .map((u) => ({
-          id: u.id,
-          name: u.profile?.display_name || u.real_name || u.name,
-        }))
-    );
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "users_list_failed" });
-  }
+    safeJson(res, users);
+  } catch (e) { next(e); }
 });
 
-/* ===== API: チャンネルのメンバー一覧 ===== */
-app.get("/api/channel-members", async (req, res) => {
+// ------------------------------------
+// API: 指定チャンネルのメンバー一覧（bot / userToken）
+//  GET /api/channel-members?channel=C123&mode=bot|user&teamId=... （user時）
+//  Bodyにも userToken を渡せます（GETなので本来はPOST推奨だが互換で）
+// ------------------------------------
+app.get("/api/channel-members", async (req, res, next) => {
   try {
-    const { channel } = req.query;
-    if (!channel) return res.status(400).json({ ok: false, error: "no_channel" });
+    const channel = req.query.channel;
+    const mode = (req.query.mode || "bot").toLowerCase();
+    const teamId = pickTeamIdFallback(req.query.teamId);
+    const userToken = req.query.userToken || req.header("x-user-token");
 
-    let cursor, ids = [];
-    do {
-      const r = await client.conversations.members({ channel, limit: 200, cursor });
-      ids.push(...(r.members || []));
-      cursor = r.response_metadata?.next_cursor;
-    } while (cursor);
+    if (!channel) return safeJson(res, [], 200);
+
+    const client = (mode === "user" && userToken)
+      ? new WebClient(userToken)
+      : bot;
+
+    if (!client) return safeJson(res, [], 200);
 
     const members = [];
-    for (const id of ids) {
-      try {
-        const u = await client.users.info({ user: id });
-        members.push({
-          id,
-          name: u.user?.profile?.display_name || u.user?.real_name || u.user?.name || id,
-        });
-      } catch {}
+    let cursor;
+    do {
+      const resp = await client.conversations.members({
+        channel,
+        limit: 1000,
+        cursor,
+        ...(teamId ? { team_id: teamId } : {})
+      });
+      (resp.members || []).forEach(id => members.push(id));
+      cursor = resp.response_metadata?.next_cursor;
+    } while (cursor);
+
+    // id→name 変換
+    const out = [];
+    for (let i = 0; i < members.length; i += 200) {
+      const chunk = members.slice(i, i + 200);
+      const prof = await client.users.info({ user: chunk[0] }).catch(()=>null); // preflight
+      // users.info bulkは無いので最低限で：UIはIDでも十分。必要なら徐々に引く。
+      // ここでは名前解決は必要最低限のみ（1件だけ）。全解決はコスト高なので省略。
+      // ちゃんと全員の名前が必要なら users.list でキャッシュ→map がおすすめ。
     }
-    res.json(members);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "channel_members_failed" });
-  }
+    // ここでは IDのみ返却。フロント側で users.list の結果と照合してください。
+    const shaped = members.map(id => ({ id, name: id }));
+    safeJson(res, shaped);
+  } catch (e) { next(e); }
 });
 
-/* ===== API: 履歴一覧（DBから取得） =====
-   GET /api/broadcast/history?limit=50&offset=0
-*/
-app.get("/api/broadcast/history", (req, res) => {
+// ------------------------------------
+// API: 個人トークン(xoxp)の検証とチャンネル抽出
+// POST /api/personal/verify { userToken, teamId? }
+// 返り値: { ok, user:{id,name}, memberChannels:[{id,name,is_private}], publicChannels:[...] }
+// ------------------------------------
+app.post("/api/personal/verify", async (req, res, next) => {
   try {
-    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
-    const offset = Math.max(0, Number(req.query.offset) || 0);
-    const rows = stmtSelectGroupPage.all(limit, offset);
-    const history = rows.map((r) => ({
-      id: r.id,
-      createdAt: r.created_at,
-      count: r.count,
-      channels: (r.channels || "").split(",").filter(Boolean),
-      messagePreview: r.message_preview || "",
-    }));
-    res.json({ ok: true, history });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "history_failed" });
-  }
+    const userToken = req.body?.userToken;
+    const teamId = pickTeamIdFallback(req.body?.teamId);
+    if (!userToken) return safeJson(res, { ok: false, error: "token_required" }, 400);
+
+    const userClient = new WebClient(userToken);
+
+    // 1) ユーザー確認
+    const auth = await userClient.auth.test();
+    const userId = auth.user_id;
+    const userName = auth.user;
+
+    // 2) 所属チャンネル（public/private 含む）
+    const memberChannels = [];
+    let cursor;
+    do {
+      const resp = await userClient.conversations.list({
+        limit: 1000,
+        cursor,
+        types: "public_channel,private_channel",
+        ...(teamId ? { team_id: teamId } : {})
+      });
+      (resp.channels || []).forEach(c => {
+        // 「所属している」チャンネルだけ拾いたい場合は is_member を確認
+        if (c.is_member) {
+          memberChannels.push({ id: c.id, name: c.name, is_private: !!c.is_private });
+        }
+      });
+      cursor = resp.response_metadata?.next_cursor;
+    } while (cursor);
+
+    // 3) パブリック全体（参考：UI側で混在表示したい場合に）
+    const publicChannels = [];
+    cursor = undefined;
+    do {
+      const resp = await userClient.conversations.list({
+        limit: 1000,
+        cursor,
+        types: "public_channel",
+        ...(teamId ? { team_id: teamId } : {})
+      });
+      (resp.channels || []).forEach(c => {
+        publicChannels.push({ id: c.id, name: c.name, is_private: !!c.is_private });
+      });
+      cursor = resp.response_metadata?.next_cursor;
+    } while (cursor);
+
+    safeJson(res, {
+      ok: true,
+      user: { id: userId, name: userName },
+      memberChannels,
+      publicChannels
+    });
+  } catch (e) { next(e); }
 });
 
-/* ===== API: 一括送信 =====
-   Body:
-     message, summary, channelIds[], userIds[],
-     autoJoinPublic,
-     perChannelMentions: { [chId]: { mode: "channel"|"here"|"everyone"|"user", userId?: "U..." } }
-*/
-app.post("/api/broadcast", async (req, res) => {
-  const {
-    message,
-    summary = "",
-    channelIds = [],
-    userIds = [],
-    autoJoinPublic = true,
-    perChannelMentions = {},
-  } = req.body || {};
-
-  if (!message || (!channelIds.length && !userIds.length)) {
-    return res.status(400).json({ ok: false, error: "bad_request" });
-  }
-  for (const ch of channelIds) {
-    const m = perChannelMentions[ch];
-    if (!m || !m.mode || (m.mode === "user" && !m.userId)) {
-      return res.status(400).json({ ok: false, error: `mention_required_for_${ch}` });
-    }
-  }
-
+// ------------------------------------
+// API: 送信（bot / userToken）
+//  body: { message, summary, channelIds[], userIds[], autoJoinPublic, perChannelMentions{chId:{mode,userId}}, mode: "bot"|"user", userToken?, teamId? }
+// ------------------------------------
+app.post("/api/broadcast", async (req, res, next) => {
   try {
-    // 宛先（チャンネル + DM）
-    const targets = [...channelIds];
-    for (const uid of userIds) {
-      try {
-        const opened = await client.conversations.open({ users: uid });
-        if (opened.ok && opened.channel?.id) targets.push(opened.channel.id);
-      } catch {}
+    const {
+      message,
+      summary,
+      channelIds = [],
+      userIds = [],
+      autoJoinPublic = false,
+      perChannelMentions = {},
+      mode = "bot",
+      userToken,
+      teamId
+    } = req.body || {};
+
+    if (!message || (!channelIds.length && !userIds.length)) {
+      return safeJson(res, { ok: false, error: "invalid_params" }, 400);
     }
 
-    const buildMention = (ch) => {
-      if (!isChannelId(ch)) return ""; // DMには付けない
-      const m = perChannelMentions[ch] || { mode: "channel" };
-      switch (m.mode) {
-        case "channel":  return "<!channel>";
-        case "here":     return "<!here>";
-        case "everyone": return "<!everyone>";
-        case "user":     return m.userId ? `<@${m.userId}>` : "";
-        default:         return "<!channel>";
-      }
-    };
+    const sendClient = (mode === "user" && userToken)
+      ? new WebClient(userToken)
+      : bot;
 
+    if (!sendClient) {
+      return safeJson(res, { ok: false, error: "no_token" }, 400);
+    }
+
+    const effectiveTeam = pickTeamIdFallback(teamId);
     const results = [];
-    const now = Date.now();
-    const broadcastId = newBroadcastId();
 
-    for (const ch of targets) {
+    // 1) チャンネル送信
+    for (const ch of channelIds) {
+      // 必要に応じて public auto-join（botのみ）
+      if (autoJoinPublic && sendClient === bot) {
+        try { await sendClient.conversations.join({ channel: ch }); } catch {}
+      }
+      const plan = perChannelMentions[ch] || { mode: "channel" };
+      const text = buildTextWithMention(message, plan);
+
       try {
-        if (autoJoinPublic && isChannelId(ch)) await joinIfPublic(client, ch);
-
-        const prefix = buildMention(ch);
-        const text = prefix ? `${prefix} ${message}` : message;
-
-        // 本体（削除ボタン付き）
-        const main = await client.chat.postMessage({
+        const r = await sendClient.chat.postMessage({
           channel: ch,
           text,
-          blocks: [
-            { type: "section", text: { type: "mrkdwn", text } }
-          ]
+          ...(effectiveTeam ? { team: effectiveTeam } : {})
         });
+        results.push({ ok: r.ok, channel: ch, ts: r.ts });
 
-        // 案件概要 → スレッド返信（コードブロック）
-        let summaryTs = null;
-        if (summary && main.ok && main.ts) {
-          const code = toCodeBlock(summary);
-          if (code) {
-            const rep = await client.chat.postMessage({
-              channel: ch,
-              thread_ts: main.ts,
-              text: "案件概要",
-              blocks: [{ type: "section", text: { type: "mrkdwn", text: code } }],
-              unfurl_links: false,
-              unfurl_media: false,
-            });
-            summaryTs = rep?.ts || null;
-          }
+        // 案件概要をスレッドで（任意）
+        if (summary && r.ok && r.channel && r.ts) {
+          const thr = "```\n" + summary + "\n```";
+          await sendClient.chat.postMessage({
+            channel: r.channel,
+            thread_ts: r.ts,
+            text: thr
+          });
         }
-
-        // DB保存（1宛先=1行）
-        stmtInsert.run(
-          broadcastId, ch, main.ts || null, summaryTs, now, message.slice(0, 160)
-        );
-
-        results.push({ channel: ch, ok: main.ok, ts: main.ts });
       } catch (e) {
-        results.push({ channel: ch, ok: false, error: String(e) });
+        results.push({ ok: false, channel: ch, error: e?.data?.error || e.message });
+      }
+      await sleep(250); // レート制御控えめ
+    }
+
+    // 2) DM 送信（IM open → DMへ）
+    for (const uid of userIds) {
+      try {
+        const im = await sendClient.conversations.open({ users: uid, ...(effectiveTeam ? { team_id: effectiveTeam } : {}) });
+        const r = await sendClient.chat.postMessage({ channel: im.channel.id, text: message });
+        results.push({ ok: r.ok, channel: im.channel.id, ts: r.ts, dm_to: uid });
+
+        if (summary && r.ok && r.channel && r.ts) {
+          const thr = "```\n" + summary + "\n```";
+          await sendClient.chat.postMessage({
+            channel: r.channel,
+            thread_ts: r.ts,
+            text: thr
+          });
+        }
+      } catch (e) {
+        results.push({ ok: false, dm_to: uid, error: e?.data?.error || e.message });
       }
       await sleep(250);
     }
 
-    return res.json({ ok: true, broadcast_id: broadcastId, count: targets.length, results });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: "broadcast_failed" });
-  }
+    // 直近送信の保持（取り消し用）
+    lastBroadcast = {
+      id: `b${Date.now()}`,
+      mode,
+      token: mode === "user" ? userToken : SLACK_BOT_TOKEN,
+      results: results
+        .filter(r => r.ok && r.channel && r.ts)
+        .map(r => ({ channel: r.channel, ts: r.ts }))
+    };
+
+    safeJson(res, {
+      ok: results.every(r => r.ok),
+      broadcast_id: lastBroadcast.id,
+      results
+    });
+  } catch (e) { next(e); }
 });
 
-/* ===== 取り消し（直前 / ID指定） ===== */
-async function undoByIdFromDB(id) {
-  const items = stmtSelectById.all(id);
-  const results = [];
-  for (const it of items) {
-    try {
-      if (it.summary_ts) await client.chat.delete({ channel: it.channel, ts: it.summary_ts });
-      if (it.main_ts) await client.chat.delete({ channel: it.channel, ts: it.main_ts });
-      results.push({ channel: it.channel, ok: true });
-    } catch (e) {
-      results.push({ channel: it.channel, ok: false, error: String(e) });
+// ------------------------------------
+// API: 直前の送信を取り消す（削除）
+// ------------------------------------
+app.post("/api/broadcast/undo-last", async (req, res, next) => {
+  try {
+    if (!lastBroadcast || !lastBroadcast.results?.length) {
+      return safeJson(res, { ok: false, error: "no_last_broadcast" }, 400);
     }
-    await sleep(150);
-  }
-  // DBから消去
-  stmtDeleteById.run(id);
-  return results;
-}
-
-app.post("/api/broadcast/undo-last", async (_req, res) => {
-  try {
-    const row = stmtSelectLatestId.get();
-    if (!row?.id) return res.status(400).json({ ok: false, error: "nothing_to_undo" });
-    const results = await undoByIdFromDB(row.id);
-    res.json({ ok: true, undone_broadcast_id: row.id, results });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "undo_failed" });
-  }
-});
-
-app.post("/api/broadcast/:id/undo", async (req, res) => {
-  try {
-    const id = req.params.id;
-    const has = stmtSelectById.get(id);
-    if (!has) return res.status(404).json({ ok: false, error: "not_found" });
-    const results = await undoByIdFromDB(id);
-    res.json({ ok: true, undone_broadcast_id: id, results });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: "undo_failed" });
-  }
-});
-
-/* ===== Slack インタラクション（削除ボタン） =====
-   ボタンクリックで削除が成功したら、DB側の該当行も掃除（main_ts一致）します。
-*/
-function verifySlackSignature(req, rawBody) {
-  const ts = req.headers["x-slack-request-timestamp"];
-  const sig = req.headers["x-slack-signature"];
-  if (!ts || !sig) return false;
-  if (Math.abs(Date.now() / 1000 - Number(ts)) > 60 * 5) return false; // 5分
-
-  const base = `v0:${ts}:${rawBody}`;
-  const hmac = crypto.createHmac("sha256", process.env.SLACK_SIGNING_SECRET || "");
-  hmac.update(base);
-  const my = `v0=${hmac.digest("hex")}`;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(my), Buffer.from(sig));
-  } catch {
-    return false;
-  }
-}
-
-app.post(
-  "/slack/interactive",
-  express.raw({ type: "application/x-www-form-urlencoded" }),
-  async (req, res) => {
-    const raw = req.body?.toString?.() || "";
-    if (!verifySlackSignature(req, raw)) return res.status(401).send("bad signature");
-
-    const params = new URLSearchParams(raw);
-    const payloadStr = params.get("payload") || "{}";
-    const payload = JSON.parse(payloadStr);
-
-    if (payload.type === "block_actions") {
-      const action = payload.actions?.[0];
-      const channel = payload.channel?.id;
-      const messageTs = payload.message?.ts;
-      const userId = payload.user?.id;
-
-      if (action?.action_id === "delete_broadcast" && channel && messageTs) {
-        try {
-          // 返信も先に削除
-          const rep = await client.conversations.replies({ channel, ts: messageTs, limit: 200 });
-          for (const m of rep.messages || []) {
-            if (m.ts !== messageTs) {
-              try { await client.chat.delete({ channel, ts: m.ts }); } catch {}
-            }
-          }
-          await client.chat.delete({ channel, ts: messageTs });
-
-          // DB掃除：この親メッセージに対応する行を削除
-          try { stmtDeleteByMainTs.run(messageTs); } catch {}
-
-          // 実行者にだけ見える通知
-          try {
-            await client.chat.postEphemeral({ channel, user: userId, text: "削除しました。" });
-          } catch {}
-          return res.status(200).end();
-        } catch (e) {
-          try {
-            await client.chat.postEphemeral({
-              channel, user: userId, text: `削除に失敗しました: ${e.data?.error || e.message}`
-            });
-          } catch {}
-          return res.status(200).end();
-        }
+    const client = new WebClient(lastBroadcast.token);
+    const results = [];
+    for (const item of lastBroadcast.results) {
+      try {
+        const r = await client.chat.delete({
+          channel: item.channel,
+          ts: item.ts
+        });
+        results.push({ ok: r.ok, channel: item.channel, ts: item.ts });
+      } catch (e) {
+        results.push({ ok: false, channel: item.channel, ts: item.ts, error: e?.data?.error || e.message });
       }
+      await sleep(200);
     }
-    return res.status(200).end();
-  }
-);
+    // クリア
+    lastBroadcast = null;
+    safeJson(res, { ok: results.every(r => r.ok), results });
+  } catch (e) { next(e); }
+});
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`SendSlack running on http://localhost:${port}`));
+// ------------------------------------
+// エラーハンドラ（JSONで返す）
+// ------------------------------------
+app.use((err, req, res, next) => {
+  console.error("[API Error]", err);
+  safeJson(res, { ok: false, error: err?.data?.error || err?.message || "internal_error" }, 500);
+});
+
+// ------------------------------------
+// 静的配信（最後）
+// ------------------------------------
+app.use(express.static(path.join(process.cwd(), "public")));
+app.get("*", (req, res) => {
+  res.sendFile(path.join(process.cwd(), "public", "index.html"));
+});
+
+// ------------------------------------
+app.listen(PORT, () => {
+  console.log(`Server running: http://localhost:${PORT}`);
+});

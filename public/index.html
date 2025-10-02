@@ -2,14 +2,14 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し・履歴）</title>
+  <title>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し）</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; margin: 0; padding: 24px; line-height: 1.6; }
     h1 { font-size: 20px; margin: 0 0 16px; }
     .section { margin: 18px 0; }
-    textarea, input[type="text"] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+    textarea, input[type="text"], input[type="password"] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .list { max-height: 360px; overflow: auto; border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px; background: rgba(0,0,0,0.02); }
     .tiny { color: #888; font-size: 12px; }
@@ -19,7 +19,6 @@
     @media (min-width: 960px) { .grid { grid-template-columns: 1fr 1fr; } }
     pre { background: #1111; padding: 10px; border-radius: 8px; overflow: auto; }
 
-    /* per-channel mention UI */
     .ch-row { display:flex; align-items:flex-start; gap:10px; padding:6px 4px; }
     .ch-mention { display:none; flex-wrap:wrap; gap:8px; margin-left:6px; }
     .pill { border:1px solid #ddd; border-radius:999px; padding:4px 8px; cursor:pointer; display:flex; align-items:center; }
@@ -27,13 +26,11 @@
     .badge-ok { font-size:12px; color:#0a7; margin-left:6px; }
     .mention-box { position:relative; min-width:260px; }
     .mention-input { width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:8px; }
-    .suggest { display:none; position:absolute; z-index:10; left:0; right:0; max-height:260px; overflow:auto;
-               background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.08); }
+    .suggest { display:none; position:absolute; z-index:10; left:0; right:0; max-height:260px; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.08); }
     .suggest-item { padding:8px 10px; cursor:pointer; }
     .suggest-item:hover { background:#f5f7fb; }
     .suggest-id { color:#999; font-size:12px; margin-left:6px; }
 
-    /* modals */
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; align-items: center; justify-content: center; padding: 20px; z-index: 100; }
     .modal { width: min(960px, 95vw); max-height: 90vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
     .modal header { padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 700; display:flex; justify-content: space-between; align-items:center; }
@@ -50,10 +47,25 @@
     .history-meta { flex:1; }
     .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
     .chip { padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
+    .note { color:#0a7; font-size:13px; }
   </style>
 </head>
 <body>
-  <h1>Slack 一斉送信（毎回選択／DM対応）</h1>
+  <h1>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し）</h1>
+
+  <!-- 送信者モード -->
+  <div class="section row">
+    <label><input type="radio" name="senderMode" value="bot" checked> eleand_sales（Bot）</label>
+    <label><input type="radio" name="senderMode" value="user"> 個人として送信（ユーザートークン）</label>
+  </div>
+
+  <!-- 個人トークン入力 -->
+  <div id="userTokenRow" class="section row" style="display:none;">
+    <input id="userToken" type="password" placeholder="個人トークン（xoxp-...）" />
+    <input id="teamId" type="text" placeholder="team_id（任意・.env固定があれば不要）" />
+    <button id="verifyBtn" type="button">トークン確認</button>
+    <span id="verifyNote" class="note"></span>
+  </div>
 
   <!-- 本文 -->
   <div class="section">
@@ -84,7 +96,7 @@
         <label class="row"><input type="checkbox" id="selectAll" /> CH 全選択/解除</label>
       </div>
       <div id="channels" class="list"></div>
-      <p class="tiny">プライベートCHはボット招待済みで表示・送信できます。</p>
+      <p class="tiny">プライベートCHは、該当モードのトークンがチャンネルにいる場合のみ表示・送信できます。</p>
     </section>
 
     <!-- DM 宛先ユーザー -->
@@ -99,11 +111,10 @@
     </section>
   </div>
 
-  <!-- 送信/取り消し/履歴 -->
+  <!-- 送信/取り消し -->
   <div class="section" style="display:flex; gap:10px; align-items:center;">
     <button id="sendBtn" type="button">送信</button>
     <button id="undoBtn" type="button" disabled>直前の送信を取り消す</button>
-    <button id="historyBtn" type="button" class="btn-secondary">履歴</button>
     <span id="lastId" class="tiny"></span>
   </div>
 
@@ -150,24 +161,8 @@
     </div>
   </div>
 
-  <!-- 履歴モーダル -->
-  <div id="historyModal" class="modal-backdrop" role="dialog" aria-modal="true">
-    <div class="modal">
-      <header>
-        <span>送信履歴</span>
-        <span id="closeHistory" class="muted" style="cursor:pointer;">閉じる ✕</span>
-      </header>
-      <div class="body" id="historyBody">
-        <!-- 動的に一覧を埋める -->
-      </div>
-      <footer>
-        <button id="historyReload" type="button" class="btn-secondary">再読み込み</button>
-        <button id="historyCloseBtn" type="button">閉じる</button>
-      </footer>
-    </div>
-  </div>
-
   <script>
+    // ---------- DOM refs ----------
     const listEl = document.getElementById("channels");
     const usersEl = document.getElementById("users");
     const out = document.getElementById("out");
@@ -177,9 +172,7 @@
     const selectAllUsers = document.getElementById("selectAllUsers");
     const undoBtn = document.getElementById("undoBtn");
     const lastIdEl = document.getElementById("lastId");
-    const historyBtn = document.getElementById("historyBtn");
 
-    // confirm modal refs
     const modal = document.getElementById("confirmModal");
     const closeModal = document.getElementById("closeModal");
     const backBtn = document.getElementById("backBtn");
@@ -189,40 +182,86 @@
     const previewMessage = document.getElementById("previewMessage");
     const previewSummary = document.getElementById("previewSummary");
 
-    // history modal refs
-    const historyModal = document.getElementById("historyModal");
-    const historyBody = document.getElementById("historyBody");
-    const historyClose = document.getElementById("closeHistory");
-    const historyCloseBtn = document.getElementById("historyCloseBtn");
-    const historyReload = document.getElementById("historyReload");
+    // sender mode
+    const modeRadios = [...document.querySelectorAll('input[name="senderMode"]')];
+    const userTokenRow = document.getElementById("userTokenRow");
+    const userTokenInput = document.getElementById("userToken");
+    const teamIdInput = document.getElementById("teamId");
+    const verifyBtn = document.getElementById("verifyBtn");
+    const verifyNote = document.getElementById("verifyNote");
 
+    // state
     let allChannels = [];
     let allUsers = [];
+    let allUsersMap = new Map();
+    let personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
 
-    // チャンネルごとのメンション状態 { chId -> {mode, userId?, userName?} }
+    // per-channel mention state
     const perChannelMentions = new Map();
-    // チャンネルメンバーのキャッシュ { chId -> [{id,name}, ...] }
+    // channel members cache
     const channelMembersCache = new Map();
 
-    async function fetchChannelMembers(chId) {
-      if (channelMembersCache.has(chId)) return channelMembersCache.get(chId);
-      const r = await fetch(`/api/channel-members?channel=${encodeURIComponent(chId)}`);
-      const arr = await r.json();
-      channelMembersCache.set(chId, arr || []);
-      return arr || [];
+    // ---------- utils ----------
+    function escapeHtml(s=""){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+    function openModal(){ modal.style.display = "flex"; }
+    function closeModalFn(){ modal.style.display = "none"; }
+    closeModal.onclick = backBtn.onclick = closeModalFn;
+
+    function mode() { return modeRadios.find(r => r.checked)?.value || "bot"; }
+
+    function robustJsonResponse(r) {
+      return r.text().then(raw => {
+        const ct = (r.headers.get("content-type") || "").toLowerCase();
+        if (ct.includes("application/json")) {
+          return JSON.parse(raw);
+        } else {
+          return { ok:false, error:"non_json_response", raw };
+        }
+      });
     }
 
-    /* ---- チャンネル一覧 ---- */
-    async function loadChannels() {
-      const r = await fetch("/api/channels");
-      const data = await r.json();
-      allChannels = data;
-      renderChannels(allChannels);
-      restoreSelection("selectedChannels", listEl);
+    // ---------- members ----------
+    async function fetchChannelMembers(chId) {
+      const key = `${mode()}:${chId}`;
+      if (channelMembersCache.has(key)) return channelMembersCache.get(key);
+    
+      const params = new URLSearchParams({ channel: chId, mode: mode() });
+      if (mode() === "user") {
+        if (personal.token) params.set("userToken", personal.token);
+        if (personal.teamId) params.set("teamId", personal.teamId);
+      }
+    
+      const r = await fetch(`/api/channel-members?${params.toString()}`, {
+        headers: mode()==="user" && personal.token ? { "x-user-token": personal.token } : {}
+      });
+      const arr = await r.json(); // [{id, name(=id)}...] が返ってくる想定
+    
+      // ★ ここで名前を引き直す（無ければIDを表示名に）
+      const enriched = (arr || []).map(m => ({
+        id: m.id,
+        name: allUsersMap.get(m.id) || m.name || m.id
+      }));
+    
+      channelMembersCache.set(key, enriched);
+      return enriched;
     }
+    
+    // ---------- channels ----------
+    function currentChannelSource() {
+      if (mode()==="user" && personal.ok) return personal.memberChannels;
+      return allChannels;
+    }
+
+    async function loadChannelsBot() {
+      const r = await fetch("/api/channels");
+      allChannels = await r.json();
+      renderChannels(allChannels);
+    }
+
     function renderChannels(items) {
-      const saved = new Set(JSON.parse(localStorage.getItem("selectedChannels") || "[]"));
       listEl.innerHTML = "";
+      const saved = new Set(JSON.parse(localStorage.getItem("selectedChannels") || "[]"));
+
       items.forEach(c => {
         const row = document.createElement("div");
         row.className = "ch-row";
@@ -238,7 +277,6 @@
         const ok = document.createElement("span");
         ok.className = "badge-ok"; ok.textContent = "";
 
-        // メンションUI
         const mention = document.createElement("div");
         mention.className = "ch-mention";
         mention.innerHTML = `
@@ -256,7 +294,6 @@
           </label>
         `;
 
-        // チェックでUI表示/非表示
         cb.addEventListener("change", async () => {
           if (cb.checked) {
             mention.style.display = "flex";
@@ -273,36 +310,33 @@
           }
         });
 
-        // ラジオ切替（ユーザー指定はCHメンバーから）
         mention.addEventListener("change", async (e) => {
           if (e.target.name === `m-${c.id}`) {
-            const mode = e.target.value;
+            const md = e.target.value;
             const input = mention.querySelector(".mention-input");
             const suggest = mention.querySelector(".suggest");
-            if (mode === "user") {
+            if (md === "user") {
               input.disabled = false; input.readOnly = false; input.focus();
               ok.textContent = "";
-              if (!channelMembersCache.has(c.id)) await fetchChannelMembers(c.id);
-              showMemberSuggestions(c.id, "", input, suggest, ok); // 全員を表示
+              await fetchChannelMembers(c.id);
+              showMemberSuggestions(c.id, "", input, suggest, ok);
             } else {
               input.disabled = true; input.readOnly = true; input.value = "";
               suggest.style.display = "none";
-              perChannelMentions.set(c.id, { mode });
-              ok.textContent = `✅ @${mode}`;
+              perChannelMentions.set(c.id, { mode: md });
+              ok.textContent = `✅ @${md}`;
             }
           }
         });
 
-        // 指定ユーザー：フォーカスで全員表示、入力で絞り込み、クリックで確定
         const input = mention.querySelector(".mention-input");
         const suggest = mention.querySelector(".suggest");
-
         input.addEventListener("focus", async () => {
           if (input.disabled) return;
-          if (!channelMembersCache.has(c.id)) await fetchChannelMembers(c.id);
+          await fetchChannelMembers(c.id);
           showMemberSuggestions(c.id, (input.value || "").trim().toLowerCase(), input, suggest, ok);
         });
-        input.addEventListener("input", async () => {
+        input.addEventListener("input", () => {
           const q = input.value.trim().toLowerCase();
           showMemberSuggestions(c.id, q, input, suggest, ok);
         });
@@ -324,15 +358,11 @@
       });
     }
 
-    // そのCHのメンバー候補一覧を表示/確定
     function showMemberSuggestions(chId, q, inputEl, suggestEl, okEl) {
-      const members = channelMembersCache.get(chId) || [];
+      const key = `${mode()}:${chId}`;
+      const members = channelMembersCache.get(key) || [];
       const list = (!q ? members : members.filter(m => (m.name||"").toLowerCase().includes(q))).slice(0, 100);
-      if (list.length === 0) {
-        suggestEl.style.display = "none";
-        suggestEl.innerHTML = "";
-        return;
-      }
+      if (list.length === 0) { suggestEl.style.display = "none"; suggestEl.innerHTML = ""; return; }
       suggestEl.innerHTML = "";
       list.forEach(m => {
         const div = document.createElement("div");
@@ -351,7 +381,8 @@
 
     filterInput.addEventListener("input", () => {
       const q = filterInput.value.trim().toLowerCase();
-      renderChannels(allChannels.filter(c => (c.name||"").toLowerCase().includes(q)));
+      const src = currentChannelSource();
+      renderChannels(src.filter(c => (c.name||"").toLowerCase().includes(q)));
     });
     selectAll.addEventListener("change", () => {
       listEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -360,23 +391,21 @@
       });
     });
 
-    /* ---- ユーザー一覧（DM） ---- */
+    // ---------- users ----------
     async function loadUsers() {
       const r = await fetch("/api/users");
-      const data = await r.json();
-      allUsers = data;
+      allUsers = await r.json();
+      allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
       renderUsers(allUsers);
-      restoreSelection("selectedUsers", usersEl);
     }
     function renderUsers(items) {
-      const saved = new Set(JSON.parse(localStorage.getItem("selectedUsers") || "[]"));
       usersEl.innerHTML = "";
       items.forEach(u => {
         const id = `u-${u.id}`;
         const label = document.createElement("label");
         label.style.display = "block"; label.style.padding = "6px 4px";
         label.innerHTML = `
-          <input type="checkbox" id="${id}" value="${u.id}" ${saved.has(u.id) ? "checked":""}/>
+          <input type="checkbox" id="${id}" value="${u.id}"/>
           ${escapeHtml(u.name)} <span class="tiny">(${u.id})</span>
         `;
         usersEl.appendChild(label);
@@ -390,7 +419,49 @@
       usersEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = selectAllUsers.checked);
     });
 
-    /* ---- 送信前確認 → 送信 ---- */
+    // ---------- sender mode toggle ----------
+    modeRadios.forEach(r => r.addEventListener("change", async () => {
+      if (mode()==="user") {
+        userTokenRow.style.display = "flex";
+        // 個人が未検証なら空の一覧表示
+        renderChannels(personal.ok ? personal.memberChannels : []);
+      } else {
+        userTokenRow.style.display = "none";
+        await loadChannelsBot();
+      }
+    }));
+
+    // ---------- verify personal token ----------
+    verifyBtn.onclick = async () => {
+      verifyBtn.disabled = true;
+      verifyNote.textContent = "検証中...";
+      try {
+        const userToken = userTokenInput.value.trim();
+        const teamId = teamIdInput.value.trim();
+        const r = await fetch("/api/personal/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userToken, teamId })
+        });
+        const j = await robustJsonResponse(r);
+        out.textContent = JSON.stringify(j, null, 2);
+        if (j.ok) {
+          personal = { ok:true, user:j.user, memberChannels:j.memberChannels, publicChannels:j.publicChannels, token:userToken, teamId:teamId };
+          verifyNote.textContent = `OK：${j.user.id} / 所属CH ${j.memberChannels.length}件`;
+          renderChannels(personal.memberChannels);
+        } else {
+          personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
+          verifyNote.textContent = `NG：${j.error || "verify_failed"}`;
+          renderChannels([]);
+        }
+      } catch (e) {
+        verifyNote.textContent = "エラー";
+      } finally {
+        verifyBtn.disabled = false;
+      }
+    };
+
+    // ---------- send ----------
     document.getElementById("sendBtn").onclick = async () => {
       const message = document.getElementById("message").value;
       const summary = document.getElementById("summary").value;
@@ -410,18 +481,10 @@
         }
       }
 
-      // プレビュー
-      previewChannels.innerHTML = renderPreviewChannels(channelIds);
-      previewDMs.innerHTML = renderPreviewDMs(userIds);
-      previewMessage.textContent = message;
-      previewSummary.textContent = summary || "(なし)";
-      openModal();
-    };
-
-    function renderPreviewChannels(ids) {
-      if (!ids.length) return "<span class='muted'>(なし)</span>";
-      const rows = ids.map(id => {
-        const ch = allChannels.find(c => c.id === id);
+      // preview
+      previewChannels.innerHTML = channelIds.map(id => {
+        const src = currentChannelSource();
+        const ch = src.find(c => c.id === id);
         const name = ch ? ch.name : id;
         const m = perChannelMentions.get(id);
         const mentionLabel =
@@ -429,21 +492,17 @@
             ? `<span class="pill-small">${escapeHtml(m.userName || m.userId)}</span>`
             : `<span class="pill-small">@${m.mode}</span>`;
         return `<div>• #${escapeHtml(name)} ${mentionLabel}</div>`;
-      });
-      return rows.join("");
-    }
-    function renderPreviewDMs(ids) {
-      if (!ids.length) return "<span class='muted'>(なし)</span>";
-      const rows = ids.map(id => {
+      }).join("") || "<span class='muted'>(なし)</span>";
+
+      previewDMs.innerHTML = userIds.map(id => {
         const u = allUsers.find(x => x.id === id);
         return `<div>• ${escapeHtml(u ? u.name : id)}</div>`;
-      });
-      return rows.join("");
-    }
+      }).join("") || "<span class='muted'>(なし)</span>";
 
-    function openModal(){ modal.style.display = "flex"; }
-    function closeModalFn(){ modal.style.display = "none"; }
-    closeModal.onclick = backBtn.onclick = closeModalFn;
+      previewMessage.textContent = message;
+      previewSummary.textContent = summary || "(なし)";
+      openModal();
+    };
 
     confirmSendBtn.onclick = async () => {
       confirmSendBtn.disabled = true;
@@ -459,26 +518,30 @@
         const perChannelMentionsObj = {};
         for (const [k, v] of perChannelMentions.entries()) perChannelMentionsObj[k] = v;
 
+        const body = {
+          message, summary, channelIds, userIds,
+          autoJoinPublic: document.getElementById("autoJoin").checked,
+          perChannelMentions: perChannelMentionsObj,
+          mode: mode()
+        };
+        if (mode()==="user" && personal.ok) {
+          body.userToken = personal.token;
+          if (personal.teamId) body.teamId = personal.teamId;
+        }
+
         const r = await fetch("/api/broadcast", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message,
-            summary,
-            channelIds,
-            userIds,
-            autoJoinPublic: document.getElementById("autoJoin").checked,
-            perChannelMentions: perChannelMentionsObj
-          })
+          body: JSON.stringify(body)
         });
-        const resp = await r.json();
-        out.textContent = JSON.stringify(resp, null, 2);
 
+        const resp = await robustJsonResponse(r);
+        out.textContent = JSON.stringify(resp, null, 2);
         if (resp.ok) {
           undoBtn.disabled = false;
           lastIdEl.textContent = resp.broadcast_id ? `ID: ${resp.broadcast_id}` : "";
+          closeModalFn();
         }
-        closeModalFn();
       } catch (e) {
         out.textContent = "送信に失敗しました: " + e;
       } finally {
@@ -486,119 +549,33 @@
       }
     };
 
-    /* ---- 取り消し（直前） ---- */
+    // ---------- undo ----------
     undoBtn.onclick = async () => {
       undoBtn.disabled = true;
       out.textContent = "取り消し中...";
       try {
-        const ur = await fetch("/api/broadcast/undo-last", { method: "POST" });
-        const uj = await ur.json();
-        out.textContent = JSON.stringify(uj, null, 2);
-        if (uj.ok) { lastIdEl.textContent = ""; }
+        const r = await fetch("/api/broadcast/undo-last", { method: "POST" });
+        const j = await robustJsonResponse(r);
+        out.textContent = JSON.stringify(j, null, 2);
+        if (j.ok) { lastIdEl.textContent = ""; }
       } catch (e) {
         out.textContent = "取り消しに失敗しました: " + e;
       }
     };
 
-    /* ---- 履歴モーダル ---- */
-    historyBtn.onclick = async () => { await loadHistory(); openHistory(); };
-    historyReload.onclick = async () => { await loadHistory(true); };
-    historyClose.onclick = historyCloseBtn.onclick = () => historyModal.style.display = "none";
+    // ---------- init ----------
+    (async function init(){
+      await loadChannelsBot();
+      await loadUsers();
 
-    function openHistory(){ historyModal.style.display = "flex"; }
-
-    async function loadHistory(force) {
-      // チャンネル名解決のために最新allChannelsが必要
-      if (!allChannels.length || force) await loadChannels();
-
-      historyBody.innerHTML = "読み込み中...";
-      try {
-        const r = await fetch("/api/broadcast/history?limit=50");
-        const data = await r.json();
-        if (!data.ok) throw new Error("failed to fetch history");
-
-        const mapName = new Map(allChannels.map(c => [c.id, c.name]));
-        historyBody.innerHTML = "";
-
-        if (!data.history.length) {
-          historyBody.innerHTML = `<div class="muted">履歴はまだありません。</div>`;
-          return;
-        }
-
-        data.history.forEach(item => {
-          const wrap = document.createElement("div");
-          wrap.className = "history-item";
-
-          const meta = document.createElement("div");
-          meta.className = "history-meta";
-          const dt = new Date(item.createdAt);
-          const title = document.createElement("div");
-          title.innerHTML = `<b>ID:</b> ${item.id}　<b>日時:</b> ${fmt(dt)}　<b>宛先:</b> ${item.count} 件`;
-          const preview = document.createElement("div");
-          preview.className = "muted";
-          preview.textContent = item.messagePreview || "";
-
-          const chips = document.createElement("div");
-          chips.className = "chips";
-          (item.channels || []).slice(0, 12).forEach(cid => {
-            const chip = document.createElement("span");
-            chip.className = "chip";
-            chip.textContent = `#${mapName.get(cid) || cid}`;
-            chips.appendChild(chip);
-          });
-          if ((item.channels || []).length > 12) {
-            const chip = document.createElement("span");
-            chip.className = "chip";
-            chip.textContent = `＋${(item.channels.length - 12)}`;
-            chips.appendChild(chip);
-          }
-
-          meta.appendChild(title);
-          meta.appendChild(preview);
-          meta.appendChild(chips);
-
-          const actions = document.createElement("div");
-          const btn = document.createElement("button");
-          btn.textContent = "この送信を取り消す";
-          btn.onclick = async () => {
-            btn.disabled = true;
-            try {
-              const r = await fetch(`/api/broadcast/${encodeURIComponent(item.id)}/undo`, { method: "POST" });
-              const j = await r.json();
-              out.textContent = JSON.stringify(j, null, 2);
-              if (j.ok) {
-                // UI上も消しておく
-                wrap.remove();
-              } else {
-                btn.disabled = false;
-              }
-            } catch {
-              btn.disabled = false;
-            }
-          };
-          actions.appendChild(btn);
-
-          wrap.appendChild(meta);
-          wrap.appendChild(actions);
-          historyBody.appendChild(wrap);
-        });
-      } catch (e) {
-        historyBody.innerHTML = `<div class="muted">履歴の取得に失敗しました。</div>`;
+      // 前回値復元（任意）
+      userTokenInput.value = localStorage.getItem("xoxp") || "";
+      teamIdInput.value = localStorage.getItem("teamId") || "";
+      if (userTokenInput.value) {
+        // 自動検証は控えめ。必要なら以下を有効化
+        // verifyBtn.click();
       }
-    }
-
-    function fmt(d){ const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
-
-    /* ---- 共通 ---- */
-    function restoreSelection(key, rootEl) {
-      const saved = new Set(JSON.parse(localStorage.getItem(key) || "[]"));
-      rootEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = saved.has(cb.value));
-    }
-    function escapeHtml(s=""){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-
-    // 初期ロード
-    loadChannels();
-    loadUsers();
+    })();
   </script>
 </body>
 </html>
