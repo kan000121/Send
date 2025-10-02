@@ -224,28 +224,28 @@
     async function fetchChannelMembers(chId) {
       const key = `${mode()}:${chId}`;
       if (channelMembersCache.has(key)) return channelMembersCache.get(key);
-    
+
       const params = new URLSearchParams({ channel: chId, mode: mode() });
       if (mode() === "user") {
         if (personal.token) params.set("userToken", personal.token);
         if (personal.teamId) params.set("teamId", personal.teamId);
       }
-    
+
       const r = await fetch(`/api/channel-members?${params.toString()}`, {
         headers: mode()==="user" && personal.token ? { "x-user-token": personal.token } : {}
       });
-      const arr = await r.json(); // [{id, name(=id)}...] が返ってくる想定
-    
-      // ★ ここで名前を引き直す（無ければIDを表示名に）
+      const arr = await r.json(); // [{id, name}] を返す（サーバー側で解決済み）
+
+      // ★ サーバーの name をそのまま使用。無い場合のみ allUsersMap で補完。
       const enriched = (arr || []).map(m => ({
         id: m.id,
-        name: allUsersMap.get(m.id) || m.name || m.id
+        name: m.name || allUsersMap.get(m.id) || m.id
       }));
-    
+
       channelMembersCache.set(key, enriched);
       return enriched;
     }
-    
+
     // ---------- channels ----------
     function currentChannelSource() {
       if (mode()==="user" && personal.ok) return personal.memberChannels;
@@ -394,7 +394,8 @@
     // ---------- users ----------
     async function loadUsers() {
       const r = await fetch("/api/users");
-      allUsers = await r.json();
+      const list = await r.json();
+      allUsers = list;
       allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
       renderUsers(allUsers);
     }
@@ -423,7 +424,6 @@
     modeRadios.forEach(r => r.addEventListener("change", async () => {
       if (mode()==="user") {
         userTokenRow.style.display = "flex";
-        // 個人が未検証なら空の一覧表示
         renderChannels(personal.ok ? personal.memberChannels : []);
       } else {
         userTokenRow.style.display = "none";
@@ -568,13 +568,8 @@
       await loadChannelsBot();
       await loadUsers();
 
-      // 前回値復元（任意）
       userTokenInput.value = localStorage.getItem("xoxp") || "";
       teamIdInput.value = localStorage.getItem("teamId") || "";
-      if (userTokenInput.value) {
-        // 自動検証は控えめ。必要なら以下を有効化
-        // verifyBtn.click();
-      }
     })();
   </script>
 </body>

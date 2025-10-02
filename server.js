@@ -24,17 +24,44 @@ const bot = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORSが必要ならここで適宜
-// app.use((req,res,next)=>{ res.setHeader("Access-Control-Allow-Origin","*"); ... })
-
 // 直近送信の保存（取り消し用）
 let lastBroadcast = null; // { results:[{channel,ts,mode,token}], mode }
 
-// ------------------------------------
-// helpers
-// ------------------------------------
+// ★ 追加: ユーザー名キャッシュ（workspace 内外を問わず）
+const userNameCache = new Map(); // key: userId -> { name, ts }
+const CACHE_TTL_MS = 1000 * 60 * 30; // 30分
+
+function cacheGetName(id) {
+  const hit = userNameCache.get(id);
+  if (hit && (Date.now() - hit.ts) < CACHE_TTL_MS) return hit.name;
+  return null;
+}
+
+async function resolveUserName(client, userId) {
+  // 1) キャッシュ
+  const cached = cacheGetName(userId);
+  if (cached) return cached;
+
+  // 2) users.info（Slack Connect 外部も多くは取得可）
+  try {
+    const u = await client.users.info({ user: userId });
+    const prof = u?.user?.profile || {};
+    const name =
+      prof.real_name?.trim() ||
+      prof.display_name?.trim() ||
+      u?.user?.name?.trim() ||
+      userId;
+
+    userNameCache.set(userId, { name, ts: Date.now() });
+    return name;
+  } catch (e) {
+    const fallback = userId;
+    userNameCache.set(userId, { name: fallback, ts: Date.now() });
+    return fallback;
+  }
+}
+
 function pickTeamIdFallback(teamIdFromClient) {
-  // 優先：クライアントから来た teamId → .env → 未指定
   return teamIdFromClient || TEAM_ID_ENV || undefined;
 }
 
@@ -94,7 +121,12 @@ app.get("/api/users", async (req, res, next) => {
       const resp = await bot.users.list({ limit: 1000, cursor });
       (resp.members || [])
         .filter(u => !u.deleted && !u.is_bot)
-        .forEach(u => users.push({ id: u.id, name: u.profile?.real_name || u.name || u.id }));
+        .forEach(u => {
+          const name = u.profile?.real_name || u.name || u.id;
+          users.push({ id: u.id, name });
+          // キャッシュにも入れておく（内部ユーザー高速化）
+          userNameCache.set(u.id, { name, ts: Date.now() });
+        });
       cursor = resp.response_metadata?.next_cursor;
     } while (cursor);
     safeJson(res, users);
@@ -103,8 +135,8 @@ app.get("/api/users", async (req, res, next) => {
 
 // ------------------------------------
 // API: 指定チャンネルのメンバー一覧（bot / userToken）
-//  GET /api/channel-members?channel=C123&mode=bot|user&teamId=... （user時）
-//  Bodyにも userToken を渡せます（GETなので本来はPOST推奨だが互換で）
+// GET /api/channel-members?channel=C123&mode=bot|user&teamId=... （user時）
+// Header x-user-token でもOK
 // ------------------------------------
 app.get("/api/channel-members", async (req, res, next) => {
   try {
@@ -121,7 +153,8 @@ app.get("/api/channel-members", async (req, res, next) => {
 
     if (!client) return safeJson(res, [], 200);
 
-    const members = [];
+    // 1) メンバーID一覧
+    const memberIds = [];
     let cursor;
     do {
       const resp = await client.conversations.members({
@@ -130,29 +163,25 @@ app.get("/api/channel-members", async (req, res, next) => {
         cursor,
         ...(teamId ? { team_id: teamId } : {})
       });
-      (resp.members || []).forEach(id => members.push(id));
+      (resp.members || []).forEach(id => memberIds.push(id));
       cursor = resp.response_metadata?.next_cursor;
     } while (cursor);
 
-    // id→name 変換
+    // 2) ID -> 名前解決（外部も可能な限り）
     const out = [];
-    for (let i = 0; i < members.length; i += 200) {
-      const chunk = members.slice(i, i + 200);
-      const prof = await client.users.info({ user: chunk[0] }).catch(()=>null); // preflight
-      // users.info bulkは無いので最低限で：UIはIDでも十分。必要なら徐々に引く。
-      // ここでは名前解決は必要最低限のみ（1件だけ）。全解決はコスト高なので省略。
-      // ちゃんと全員の名前が必要なら users.list でキャッシュ→map がおすすめ。
+    for (const uid of memberIds) {
+      const name = await resolveUserName(client, uid);
+      out.push({ id: uid, name });
+      await sleep(50); // 軽いレート制御
     }
-    // ここでは IDのみ返却。フロント側で users.list の結果と照合してください。
-    const shaped = members.map(id => ({ id, name: id }));
-    safeJson(res, shaped);
+
+    safeJson(res, out);
   } catch (e) { next(e); }
 });
 
 // ------------------------------------
 // API: 個人トークン(xoxp)の検証とチャンネル抽出
 // POST /api/personal/verify { userToken, teamId? }
-// 返り値: { ok, user:{id,name}, memberChannels:[{id,name,is_private}], publicChannels:[...] }
 // ------------------------------------
 app.post("/api/personal/verify", async (req, res, next) => {
   try {
@@ -167,7 +196,7 @@ app.post("/api/personal/verify", async (req, res, next) => {
     const userId = auth.user_id;
     const userName = auth.user;
 
-    // 2) 所属チャンネル（public/private 含む）
+    // 2) 所属チャンネル
     const memberChannels = [];
     let cursor;
     do {
@@ -178,7 +207,6 @@ app.post("/api/personal/verify", async (req, res, next) => {
         ...(teamId ? { team_id: teamId } : {})
       });
       (resp.channels || []).forEach(c => {
-        // 「所属している」チャンネルだけ拾いたい場合は is_member を確認
         if (c.is_member) {
           memberChannels.push({ id: c.id, name: c.name, is_private: !!c.is_private });
         }
@@ -186,7 +214,7 @@ app.post("/api/personal/verify", async (req, res, next) => {
       cursor = resp.response_metadata?.next_cursor;
     } while (cursor);
 
-    // 3) パブリック全体（参考：UI側で混在表示したい場合に）
+    // 3) パブリック全体（参考）
     const publicChannels = [];
     cursor = undefined;
     do {
@@ -213,7 +241,7 @@ app.post("/api/personal/verify", async (req, res, next) => {
 
 // ------------------------------------
 // API: 送信（bot / userToken）
-//  body: { message, summary, channelIds[], userIds[], autoJoinPublic, perChannelMentions{chId:{mode,userId}}, mode: "bot"|"user", userToken?, teamId? }
+// body: { message, summary, channelIds[], userIds[], autoJoinPublic, perChannelMentions{chId:{mode,userId}}, mode, userToken?, teamId? }
 // ------------------------------------
 app.post("/api/broadcast", async (req, res, next) => {
   try {
@@ -246,7 +274,6 @@ app.post("/api/broadcast", async (req, res, next) => {
 
     // 1) チャンネル送信
     for (const ch of channelIds) {
-      // 必要に応じて public auto-join（botのみ）
       if (autoJoinPublic && sendClient === bot) {
         try { await sendClient.conversations.join({ channel: ch }); } catch {}
       }
@@ -261,7 +288,6 @@ app.post("/api/broadcast", async (req, res, next) => {
         });
         results.push({ ok: r.ok, channel: ch, ts: r.ts });
 
-        // 案件概要をスレッドで（任意）
         if (summary && r.ok && r.channel && r.ts) {
           const thr = "```\n" + summary + "\n```";
           await sendClient.chat.postMessage({
@@ -273,10 +299,10 @@ app.post("/api/broadcast", async (req, res, next) => {
       } catch (e) {
         results.push({ ok: false, channel: ch, error: e?.data?.error || e.message });
       }
-      await sleep(250); // レート制御控えめ
+      await sleep(250);
     }
 
-    // 2) DM 送信（IM open → DMへ）
+    // 2) DM 送信
     for (const uid of userIds) {
       try {
         const im = await sendClient.conversations.open({ users: uid, ...(effectiveTeam ? { team_id: effectiveTeam } : {}) });
@@ -337,7 +363,6 @@ app.post("/api/broadcast/undo-last", async (req, res, next) => {
       }
       await sleep(200);
     }
-    // クリア
     lastBroadcast = null;
     safeJson(res, { ok: results.every(r => r.ok), results });
   } catch (e) { next(e); }
