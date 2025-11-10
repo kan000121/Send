@@ -1,576 +1,662 @@
 <!doctype html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <title>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し）</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; margin: 0; padding: 24px; line-height: 1.6; }
-    h1 { font-size: 20px; margin: 0 0 16px; }
-    .section { margin: 18px 0; }
-    textarea, input[type="text"], input[type="password"] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    .list { max-height: 360px; overflow: auto; border: 1px solid #e0e0e0; border-radius: 10px; padding: 10px; background: rgba(0,0,0,0.02); }
-    .tiny { color: #888; font-size: 12px; }
-    button { padding: 10px 16px; border: none; border-radius: 10px; background: #3f7ae0; color: #fff; font-weight: 600; cursor: pointer; }
-    button:disabled { opacity: .6; cursor: not-allowed; }
-    .grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
-    @media (min-width: 960px) { .grid { grid-template-columns: 1fr 1fr; } }
-    pre { background: #1111; padding: 10px; border-radius: 8px; overflow: auto; }
+<meta charset="utf-8" />
+<title>Slack 一斉送信（@channel か 指定ユーザーのどちらか必須 + 最終確認）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; margin:0; padding:24px; line-height:1.6; }
+  .section { margin:18px 0; }
+  .grid { display:grid; grid-template-columns:1fr; gap:18px; }
+  @media(min-width:960px){ .grid{ grid-template-columns:1fr 1fr; } }
+  textarea,input[type="text"],input[type="password"]{ width:100%; padding:10px 12px; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; }
+  .list { max-height:360px; overflow:auto; border:1px solid #e0e0e0; border-radius:10px; padding:10px; background:rgba(0,0,0,.02); }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .ch-row { display:flex; align-items:flex-start; gap:10px; padding:6px 4px; }
+  .ch-mention { display:none; flex-wrap:wrap; gap:8px; margin-left:6px; }
+  .pill { border:1px solid #ddd; border-radius:999px; padding:4px 8px; display:flex; align-items:center; gap:6px; }
+  .badge-ok{ font-size:12px; color:#0a7; margin-left:6px; }
+  .mention-box{ position:relative; min-width:320px; }
+  .mention-input{ width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:8px; }
+  .suggest{ display:none; position:absolute; z-index:1000; left:0; right:0; max-height:260px; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.08); }
+  .suggest-item{ padding:8px 10px; cursor:pointer; }
+  .suggest-item:hover{ background:#f5f7fb; }
+  .suggest-id{ color:#999; font-size:12px; margin-left:6px; }
+  .chips{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .chip{ padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; background:#fff; display:flex; align-items:center; gap:6px;}
+  .chip button{ border:none; background:transparent; padding:0 4px; cursor:pointer; color:#999;}
 
-    .ch-row { display:flex; align-items:flex-start; gap:10px; padding:6px 4px; }
-    .ch-mention { display:none; flex-wrap:wrap; gap:8px; margin-left:6px; }
-    .pill { border:1px solid #ddd; border-radius:999px; padding:4px 8px; cursor:pointer; display:flex; align-items:center; }
-    .pill input { margin-right:4px; }
-    .badge-ok { font-size:12px; color:#0a7; margin-left:6px; }
-    .mention-box { position:relative; min-width:260px; }
-    .mention-input { width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:8px; }
-    .suggest { display:none; position:absolute; z-index:10; left:0; right:0; max-height:260px; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.08); }
-    .suggest-item { padding:8px 10px; cursor:pointer; }
-    .suggest-item:hover { background:#f5f7fb; }
-    .suggest-id { color:#999; font-size:12px; margin-left:6px; }
+  button{ padding:10px 16px; border:none; border-radius:10px; background:#3f7ae0; color:#fff; font-weight:600; cursor:pointer;}
+  button:disabled{ opacity:.6; cursor:not-allowed; }
+  .tiny{ color:#888; font-size:12px; }
+  pre{ background:#1111; padding:10px; border-radius:8px; overflow:auto; }
 
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; align-items: center; justify-content: center; padding: 20px; z-index: 100; }
-    .modal { width: min(960px, 95vw); max-height: 90vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
-    .modal header { padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 700; display:flex; justify-content: space-between; align-items:center; }
-    .modal .body { padding: 16px 18px; display: grid; grid-template-columns: 1fr; gap: 16px; }
-    .modal footer { padding: 14px 18px; border-top: 1px solid #eee; display:flex; gap: 10px; justify-content: flex-end; }
-    .muted { color:#666; font-size:13px; }
-    .table { border:1px solid #e5e5e5; border-radius: 10px; overflow: hidden; }
-    .table table { width:100%; border-collapse: collapse; }
-    .table th, .table td { padding: 8px 10px; border-bottom: 1px solid #f2f2f2; text-align: left; vertical-align: top; }
-    .codebox { background:#1111; border:1px solid #e5e5e5; border-radius:10px; padding:10px; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .btn-secondary { background:#f2f4f8; color:#333; }
-    .pill-small { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
-    .history-item { border:1px solid #eee; border-radius:10px; padding:10px; display:flex; gap:12px; align-items:flex-start; }
-    .history-meta { flex:1; }
-    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
-    .chip { padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
-    .note { color:#0a7; font-size:13px; }
-  </style>
+  /* modal */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; align-items: center; justify-content: center; padding: 20px; z-index: 100; }
+  .modal { width: min(960px, 95vw); max-height: 90vh; overflow: auto; background: #fff; border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+  .modal header { padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 700; display:flex; justify-content: space-between; align-items:center; }
+  .modal .body { padding: 16px 18px; display: grid; grid-template-columns: 1fr; gap: 16px; }
+  .modal footer { padding: 14px 18px; border-top: 1px solid #eee; display:flex; gap: 10px; justify-content: flex-end; }
+  .table { border:1px solid #e5e5e5; border-radius: 10px; overflow: hidden; }
+  .table table { width:100%; border-collapse: collapse; }
+  .table th, .table td { padding: 8px 10px; border-bottom: 1px solid #f2f2f2; text-align: left; vertical-align: top; }
+  .codebox { background:#1111; border:1px solid #e5e5e5; border-radius:10px; padding:10px; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .btn-secondary { background:#f2f4f8; color:#333; }
+  .pill-small { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
+</style>
 </head>
 <body>
-  <h1>Slack 一斉送信（チャンネル別メンション／DM・確認・取り消し）</h1>
+<h1>Slack 一斉送信（各チャンネルで @channel か 指定ユーザー のどちらか必須）</h1>
 
-  <!-- 送信者モード -->
-  <div class="section row">
-    <label><input type="radio" name="senderMode" value="bot" checked> eleand_sales（Bot）</label>
-    <label><input type="radio" name="senderMode" value="user"> 個人として送信（ユーザートークン）</label>
-  </div>
+<!-- モード選択 -->
+<div class="section row">
+  <label><input type="radio" name="senderMode" value="bot"> eleand_sales（Bot）</label>
+  <label><input type="radio" name="senderMode" value="user" checked> 個人として送信（ユーザートークン）</label>
+</div>
 
-  <!-- 個人トークン入力 -->
-  <div id="userTokenRow" class="section row" style="display:none;">
-    <input id="userToken" type="password" placeholder="個人トークン（xoxp-...）" />
-    <input id="teamId" type="text" placeholder="team_id（任意・.env固定があれば不要）" />
-    <button id="verifyBtn" type="button">トークン確認</button>
-    <span id="verifyNote" class="note"></span>
-  </div>
+<!-- ↓ 初期表示状態で見えるように変更 -->
+<div id="userTokenRow" class="section row" style="display:flex;">
+  <input id="userToken" type="password" placeholder="個人トークン（xoxp-...）" />
+  <input id="teamId" type="text" placeholder="team_id（任意）" />
+  <button id="verifyBtn" type="button">トークン確認</button>
+  <span id="verifyNote" class="tiny"></span>
+</div>
 
-  <!-- 本文 -->
-  <div class="section">
-    <label for="message">メッセージ本文 <span class="tiny">（必須・改行OK）</span></label>
-    <textarea id="message" rows="6" placeholder="ここに本文（チャンネル宛には各行でメンションを必ず指定）"></textarea>
-  </div>
+<!-- 本文 -->
+<div class="section">
+  <label for="message">メッセージ本文 <span class="tiny">（必須）</span></label>
+  <textarea id="message" rows="6" placeholder="本文"></textarea>
+</div>
 
-  <!-- 案件概要（スレッド返信：コードブロック） -->
-  <div class="section">
-    <label for="summary">案件概要（任意・本文投稿後にスレッド返信としてコードブロックで投稿）</label>
-    <textarea id="summary" rows="10" placeholder="ここに案件概要（Slackでは ``` で囲んだコードブロックとして投稿）"></textarea>
-  </div>
+<!-- 案件概要（スレッド返信） -->
+<div class="section">
+  <label for="summary">案件概要（任意・コードブロックでスレッド返信）</label>
+  <textarea id="summary" rows="8" placeholder="``` で囲んだ形式で投稿されます（自動）"></textarea>
+</div>
 
-  <!-- オプション -->
-  <div class="section row">
-    <label class="row" style="gap:6px;">
-      <input type="checkbox" id="autoJoin" checked />
-      公開CHに未参加なら自動参加
-    </label>
-  </div>
+<!-- オプション -->
+<div class="section row">
+  <label class="row" style="gap:6px;"><input type="checkbox" id="autoJoin" checked /> 公開CHに未参加なら自動参加</label>
+</div>
 
-  <div class="section grid">
-    <!-- 送信先チャンネル -->
-    <section>
-      <h3>送信先チャンネル（複数選択可・各行でメンション必須）</h3>
-      <div class="row">
-        <input id="filter" type="text" placeholder="チャンネル名で絞り込み" />
-        <label class="row"><input type="checkbox" id="selectAll" /> CH 全選択/解除</label>
-      </div>
-      <div id="channels" class="list"></div>
-      <p class="tiny">プライベートCHは、該当モードのトークンがチャンネルにいる場合のみ表示・送信できます。</p>
-    </section>
-
-    <!-- DM 宛先ユーザー -->
-    <section>
-      <h3>DM 宛先ユーザー（任意・複数選択可）</h3>
-      <div class="row">
-        <input id="userFilter" type="text" placeholder="ユーザー名で絞り込み" />
-        <label class="row"><input type="checkbox" id="selectAllUsers" /> ユーザー全選択/解除</label>
-      </div>
-      <div id="users" class="list"></div>
-      <p class="tiny">ユーザー一覧はBotの権限（users:read）が必要です。</p>
-    </section>
-  </div>
-
-  <!-- 送信/取り消し -->
-  <div class="section" style="display:flex; gap:10px; align-items:center;">
-    <button id="sendBtn" type="button">送信</button>
-    <button id="undoBtn" type="button" disabled>直前の送信を取り消す</button>
-    <span id="lastId" class="tiny"></span>
-  </div>
-
-  <!-- レスポンス -->
-  <div class="section">
-    <h3>レスポンス</h3>
-    <pre id="out"></pre>
-  </div>
-
-  <!-- 送信前確認モーダル -->
-  <div id="confirmModal" class="modal-backdrop" role="dialog" aria-modal="true">
-    <div class="modal">
-      <header>
-        <span>送信前の最終確認</span>
-        <span id="closeModal" class="muted" style="cursor:pointer;">閉じる ✕</span>
-      </header>
-      <div class="body">
-        <div class="table">
-          <table>
-            <thead>
-              <tr><th style="width:36%;">チャンネル（メンション）</th><th>DM 宛先ユーザー</th></tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td id="previewChannels"></td>
-                <td id="previewDMs"></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div>
-          <div class="muted">本文プレビュー</div>
-          <div id="previewMessage" class="codebox"></div>
-        </div>
-        <div>
-          <div class="muted">案件概要プレビュー（スレッド返信・コードブロック）</div>
-          <div id="previewSummary" class="codebox"></div>
-        </div>
-      </div>
-      <footer>
-        <button id="backBtn" type="button" class="btn-secondary">戻る</button>
-        <button id="confirmSendBtn" type="button">送信する</button>
-      </footer>
+<div class="section grid">
+  <!-- 送信先チャンネル -->
+  <section>
+    <h3>送信先チャンネル</h3>
+    <div class="row">
+      <input id="filter" type="text" placeholder="チャンネル名で絞り込み" />
+      <label class="row"><input type="checkbox" id="selectAll" /> CH 全選択/解除</label>
     </div>
+    <div id="channels" class="list"></div>
+    <p class="tiny">※プライベートCHは、該当モードのトークンがCHにいる場合のみ表示可能です。</p>
+  </section>
+
+  <!-- DM 宛先ユーザー -->
+  <section>
+    <h3>DM 宛先ユーザー（任意）</h3>
+    <div class="row">
+      <input id="userFilter" type="text" placeholder="ユーザー名で絞り込み" />
+      <label class="row"><input type="checkbox" id="selectAllUsers" /> ユーザー全選択/解除</label>
+    </div>
+    <div id="users" class="list"></div>
+    <p class="tiny">ユーザー一覧はBot権限（users:read）が必要です。</p>
+  </section>
+</div>
+
+<!-- 実行 -->
+<div class="section" style="display:flex; gap:10px; align-items:center;">
+  <button id="sendBtn" type="button">送信</button>
+  <button id="undoBtn" type="button" disabled>直前の送信を取り消す</button>
+  <span id="lastId" class="tiny"></span>
+</div>
+
+<!-- レスポンス -->
+<div class="section">
+  <h3>レスポンス</h3>
+  <pre id="out"></pre>
+</div>
+
+<!-- 送信前確認モーダル -->
+<div id="confirmModal" class="modal-backdrop" role="dialog" aria-modal="true">
+  <div class="modal">
+    <header>
+      <span>送信前の最終確認</span>
+      <span id="closeModal" class="tiny" style="cursor:pointer;">閉じる ✕</span>
+    </header>
+    <div class="body">
+      <div class="table">
+        <table>
+          <thead>
+            <tr><th style="width:36%;">チャンネル（メンション）</th><th>DM 宛先ユーザー</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td id="previewChannels"></td>
+              <td id="previewDMs"></td>
+              
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div class="tiny">本文プレビュー</div>
+        <div id="previewMessage" class="codebox"></div>
+      </div>
+      <div>
+        <div class="tiny">案件概要プレビュー（スレッド返信・コードブロック）</div>
+        <div id="previewSummary" class="codebox"></div>
+      </div>
+    </div>
+    <footer>
+      <button id="backBtn" type="button" class="btn-secondary">戻る</button>
+      <button id="confirmSendBtn" type="button">送信する</button>
+    </footer>
   </div>
+</div>
 
-  <script>
-    // ---------- DOM refs ----------
-    const listEl = document.getElementById("channels");
-    const usersEl = document.getElementById("users");
-    const out = document.getElementById("out");
-    const filterInput = document.getElementById("filter");
-    const userFilter = document.getElementById("userFilter");
-    const selectAll = document.getElementById("selectAll");
-    const selectAllUsers = document.getElementById("selectAllUsers");
-    const undoBtn = document.getElementById("undoBtn");
-    const lastIdEl = document.getElementById("lastId");
+<script>
+  // ---------- DOM refs ----------
+  const listEl = document.getElementById("channels");
+  const usersEl = document.getElementById("users");
+  const out = document.getElementById("out");
+  const filterInput = document.getElementById("filter");
+  const userFilter = document.getElementById("userFilter");
+  const selectAll = document.getElementById("selectAll");
+  const selectAllUsers = document.getElementById("selectAllUsers");
+  const undoBtn = document.getElementById("undoBtn");
+  const lastIdEl = document.getElementById("lastId");
 
-    const modal = document.getElementById("confirmModal");
-    const closeModal = document.getElementById("closeModal");
-    const backBtn = document.getElementById("backBtn");
-    const confirmSendBtn = document.getElementById("confirmSendBtn");
-    const previewChannels = document.getElementById("previewChannels");
-    const previewDMs = document.getElementById("previewDMs");
-    const previewMessage = document.getElementById("previewMessage");
-    const previewSummary = document.getElementById("previewSummary");
+  // modal refs
+  const modal = document.getElementById("confirmModal");
+  const closeModal = document.getElementById("closeModal");
+  const backBtn = document.getElementById("backBtn");
+  const confirmSendBtn = document.getElementById("confirmSendBtn");
+  const previewChannels = document.getElementById("previewChannels");
+  const previewDMs = document.getElementById("previewDMs");
+  const previewMessage = document.getElementById("previewMessage");
+  const previewSummary = document.getElementById("previewSummary");
+  const openModal = () => modal.style.display = "flex";
+  const closeModalFn = () => modal.style.display = "none";
+  closeModal.onclick = backBtn.onclick = closeModalFn;
 
-    // sender mode
-    const modeRadios = [...document.querySelectorAll('input[name="senderMode"]')];
-    const userTokenRow = document.getElementById("userTokenRow");
-    const userTokenInput = document.getElementById("userToken");
-    const teamIdInput = document.getElementById("teamId");
-    const verifyBtn = document.getElementById("verifyBtn");
-    const verifyNote = document.getElementById("verifyNote");
+  // mode
+  const modeRadios = [...document.querySelectorAll('input[name="senderMode"]')];
+  const userTokenRow = document.getElementById("userTokenRow");
+  const userTokenInput = document.getElementById("userToken");
+  const teamIdInput = document.getElementById("teamId");
+  const verifyBtn = document.getElementById("verifyBtn");
+  const verifyNote = document.getElementById("verifyNote");
 
-    // state
-    let allChannels = [];
-    let allUsers = [];
-    let allUsersMap = new Map();
-    let personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
+  // state
+  let allChannels = [];
+  let allUsers = [];
+  let allUsersMap = new Map();
+  let personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
 
-    // per-channel mention state
-    const perChannelMentions = new Map();
-    // channel members cache
-    const channelMembersCache = new Map();
+  // per-channel plan: Map<chId, { mode:"channel"|"user", users?:[{id,name}] }>
+  const perChannelMentions = new Map();
+  // cache
+  const channelMembersCache = new Map();
 
-    // ---------- utils ----------
-    function escapeHtml(s=""){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-    function openModal(){ modal.style.display = "flex"; }
-    function closeModalFn(){ modal.style.display = "none"; }
-    closeModal.onclick = backBtn.onclick = closeModalFn;
+  const LS_SELECTED_CH = "selectedChannels_onlyChannelOrUsers";
+  const LS_PLAN = "perChannelMentions_onlyChannelOrUsers";
 
-    function mode() { return modeRadios.find(r => r.checked)?.value || "bot"; }
+  const getMode = () => modeRadios.find(r => r.checked)?.value || "user";
+  const escapeHtml = (s="") => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const robustJsonResponse = (r) => r.text().then(raw => ((r.headers.get("content-type")||"").toLowerCase().includes("application/json") ? JSON.parse(raw) : { ok:false, error:"non_json_response", raw }));
 
-    function robustJsonResponse(r) {
-      return r.text().then(raw => {
-        const ct = (r.headers.get("content-type") || "").toLowerCase();
-        if (ct.includes("application/json")) {
-          return JSON.parse(raw);
-        } else {
-          return { ok:false, error:"non_json_response", raw };
-        }
-      });
+  // persist
+  function saveSelectedChannels() {
+    const ids = [...listEl.querySelectorAll('input[type="checkbox"][id^="ch-"]:checked')].map(cb => cb.value);
+    localStorage.setItem(LS_SELECTED_CH, JSON.stringify(ids));
+  }
+  function loadSelectedChannels() {
+    try { return new Set(JSON.parse(localStorage.getItem(LS_SELECTED_CH) || "[]")); } catch { return new Set(); }
+  }
+  function savePlans() {
+    const obj = {};
+    for (const [k,v] of perChannelMentions.entries()) obj[k] = v;
+    localStorage.setItem(LS_PLAN, JSON.stringify(obj));
+  }
+  function loadPlans() {
+    try {
+      const obj = JSON.parse(localStorage.getItem(LS_PLAN) || "{}");
+      Object.entries(obj).forEach(([k,v]) => perChannelMentions.set(k, v));
+    } catch {}
+  }
+
+  // members
+  async function fetchChannelMembers(chId) {
+    const key = `${getMode()}:${chId}`;
+    if (channelMembersCache.has(key)) return channelMembersCache.get(key);
+
+    const params = new URLSearchParams({ channel: chId, mode: getMode() });
+    if (getMode()==="user") {
+      if (personal.token) params.set("userToken", personal.token);
+      if (personal.teamId) params.set("teamId", personal.teamId);
     }
+    const r = await fetch(`/api/channel-members?${params.toString()}`, {
+      headers: getMode()==="user" && personal.token ? { "x-user-token": personal.token } : {}
+    });
+    const arr = await r.json();
+    const members = (arr||[]).map(m => ({ id:m.id, name: m.name || allUsersMap.get(m.id) || m.id }));
+    channelMembersCache.set(key, members);
+    return members;
+  }
 
-    // ---------- members ----------
-    async function fetchChannelMembers(chId) {
-      const key = `${mode()}:${chId}`;
-      if (channelMembersCache.has(key)) return channelMembersCache.get(key);
+  function currentChannelSource() { return (getMode()==="user" && personal.ok) ? personal.memberChannels : allChannels; }
 
-      const params = new URLSearchParams({ channel: chId, mode: mode() });
-      if (mode() === "user") {
-        if (personal.token) params.set("userToken", personal.token);
-        if (personal.teamId) params.set("teamId", personal.teamId);
-      }
+  async function loadChannelsBot() {
+    const r = await fetch("/api/channels");
+    allChannels = await r.json();
+    renderChannels(allChannels);
+  }
 
-      const r = await fetch(`/api/channel-members?${params.toString()}`, {
-        headers: mode()==="user" && personal.token ? { "x-user-token": personal.token } : {}
-      });
-      const arr = await r.json(); // [{id, name}] を返す（サーバー側で解決済み）
+  // UI render
+  function renderChannels(items) {
+    listEl.innerHTML = "";
+    const saved = loadSelectedChannels();
 
-      // ★ サーバーの name をそのまま使用。無い場合のみ allUsersMap で補完。
-      const enriched = (arr || []).map(m => ({
-        id: m.id,
-        name: m.name || allUsersMap.get(m.id) || m.id
-      }));
+    items.forEach(c => {
+      const row = document.createElement("div");
+      row.className = "ch-row";
 
-      channelMembersCache.set(key, enriched);
-      return enriched;
-    }
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.value = c.id; cb.id = `ch-${c.id}`;
+      cb.checked = saved.has(c.id);
 
-    // ---------- channels ----------
-    function currentChannelSource() {
-      if (mode()==="user" && personal.ok) return personal.memberChannels;
-      return allChannels;
-    }
+      const label = document.createElement("label");
+      label.setAttribute("for", cb.id);
+      label.innerHTML = `${escapeHtml(c.name)} <span class="tiny">(${c.is_private ? "Private":"Public"} / ${c.id})</span>`;
 
-    async function loadChannelsBot() {
-      const r = await fetch("/api/channels");
-      allChannels = await r.json();
-      renderChannels(allChannels);
-    }
+      const ok = document.createElement("span");
+      ok.className = "badge-ok";
 
-    function renderChannels(items) {
-      listEl.innerHTML = "";
-      const saved = new Set(JSON.parse(localStorage.getItem("selectedChannels") || "[]"));
+      const mention = document.createElement("div");
+      mention.className = "ch-mention";
+      mention.innerHTML = `
+        <label class="pill"><input type="radio" name="m-${c.id}" value="channel"> @channel</label>
+        <label class="pill" style="gap:6px;">
+          <input type="radio" name="m-${c.id}" value="user"> 指定ユーザー
+          <div class="mention-box">
+            <input class="mention-input" type="text" placeholder="このCHのメンバー一覧（クリックで追加・複数可）" disabled readonly />
+            <div class="suggest"></div>
+            <div class="chips"></div>
+          </div>
+        </label>
+      `;
 
-      items.forEach(c => {
-        const row = document.createElement("div");
-        row.className = "ch-row";
-
-        const cb = document.createElement("input");
-        cb.type = "checkbox"; cb.value = c.id; cb.id = `ch-${c.id}`;
-        if (saved.has(c.id)) cb.checked = true;
-
-        const label = document.createElement("label");
-        label.setAttribute("for", cb.id);
-        label.innerHTML = `${escapeHtml(c.name)} <span class="tiny">(${c.is_private ? "Private":"Public"} / ${c.id})</span>`;
-
-        const ok = document.createElement("span");
-        ok.className = "badge-ok"; ok.textContent = "";
-
-        const mention = document.createElement("div");
-        mention.className = "ch-mention";
-        mention.innerHTML = `
-          <label class="pill"><input type="radio" name="m-${c.id}" value="channel"> @channel</label>
-          <label class="pill"><input type="radio" name="m-${c.id}" value="here"> @here</label>
-          <label class="pill"><input type="radio" name="m-${c.id}" value="everyone"> @everyone</label>
-          <label class="pill" style="gap:6px;">
-            <input type="radio" name="m-${c.id}" value="user"> 指定ユーザー
-            <div class="mention-box">
-              <input class="mention-input" type="text"
-                     placeholder="このCHのメンバー一覧（クリックで選択）"
-                     disabled readonly />
-              <div class="suggest"></div>
-            </div>
-          </label>
-        `;
-
-        cb.addEventListener("change", async () => {
-          if (cb.checked) {
-            mention.style.display = "flex";
-            if (!perChannelMentions.get(c.id)) {
-              perChannelMentions.set(c.id, { mode:"channel" });
-              mention.querySelector(`input[value="channel"]`).checked = true;
-            }
-            const m = perChannelMentions.get(c.id);
-            ok.textContent = m.mode === "user" ? `✅ ${m.userName || ""}` : `✅ @${m.mode}`;
-          } else {
-            mention.style.display = "none";
-            ok.textContent = "";
-            perChannelMentions.delete(c.id);
-          }
-        });
-
-        mention.addEventListener("change", async (e) => {
-          if (e.target.name === `m-${c.id}`) {
-            const md = e.target.value;
-            const input = mention.querySelector(".mention-input");
-            const suggest = mention.querySelector(".suggest");
-            if (md === "user") {
-              input.disabled = false; input.readOnly = false; input.focus();
-              ok.textContent = "";
-              await fetchChannelMembers(c.id);
-              showMemberSuggestions(c.id, "", input, suggest, ok);
-            } else {
-              input.disabled = true; input.readOnly = true; input.value = "";
-              suggest.style.display = "none";
-              perChannelMentions.set(c.id, { mode: md });
-              ok.textContent = `✅ @${md}`;
-            }
-          }
-        });
-
-        const input = mention.querySelector(".mention-input");
-        const suggest = mention.querySelector(".suggest");
-        input.addEventListener("focus", async () => {
-          if (input.disabled) return;
-          await fetchChannelMembers(c.id);
-          showMemberSuggestions(c.id, (input.value || "").trim().toLowerCase(), input, suggest, ok);
-        });
-        input.addEventListener("input", () => {
-          const q = input.value.trim().toLowerCase();
-          showMemberSuggestions(c.id, q, input, suggest, ok);
-        });
-        input.addEventListener("blur", () => setTimeout(()=>suggest.style.display="none",150));
-
-        row.appendChild(cb);
-        row.appendChild(label);
-        row.appendChild(ok);
-        row.appendChild(mention);
-        listEl.appendChild(row);
-
+      // checkbox toggle
+      cb.addEventListener("change", () => {
         if (cb.checked) {
           mention.style.display = "flex";
-          const m = perChannelMentions.get(c.id) || { mode:"channel" };
-          perChannelMentions.set(c.id, m);
-          ok.textContent = m.mode === "user" ? `✅ ${m.userName || ""}` : `✅ @${m.mode}`;
-          if (m.mode === "channel") mention.querySelector(`input[value="channel"]`).checked = true;
-        }
-      });
-    }
-
-    function showMemberSuggestions(chId, q, inputEl, suggestEl, okEl) {
-      const key = `${mode()}:${chId}`;
-      const members = channelMembersCache.get(key) || [];
-      const list = (!q ? members : members.filter(m => (m.name||"").toLowerCase().includes(q))).slice(0, 100);
-      if (list.length === 0) { suggestEl.style.display = "none"; suggestEl.innerHTML = ""; return; }
-      suggestEl.innerHTML = "";
-      list.forEach(m => {
-        const div = document.createElement("div");
-        div.className = "suggest-item";
-        div.innerHTML = `${escapeHtml(m.name)} <span class="suggest-id">${m.id}</span>`;
-        div.onclick = () => {
-          inputEl.value = m.name;
-          perChannelMentions.set(chId, { mode:"user", userId:m.id, userName:m.name });
-          okEl.textContent = `✅ ${m.name}`;
-          suggestEl.style.display = "none";
-        };
-        suggestEl.appendChild(div);
-      });
-      suggestEl.style.display = "block";
-    }
-
-    filterInput.addEventListener("input", () => {
-      const q = filterInput.value.trim().toLowerCase();
-      const src = currentChannelSource();
-      renderChannels(src.filter(c => (c.name||"").toLowerCase().includes(q)));
-    });
-    selectAll.addEventListener("change", () => {
-      listEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-        cb.checked = selectAll.checked;
-        cb.dispatchEvent(new Event("change"));
-      });
-    });
-
-    // ---------- users ----------
-    async function loadUsers() {
-      const r = await fetch("/api/users");
-      const list = await r.json();
-      allUsers = list;
-      allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
-      renderUsers(allUsers);
-    }
-    function renderUsers(items) {
-      usersEl.innerHTML = "";
-      items.forEach(u => {
-        const id = `u-${u.id}`;
-        const label = document.createElement("label");
-        label.style.display = "block"; label.style.padding = "6px 4px";
-        label.innerHTML = `
-          <input type="checkbox" id="${id}" value="${u.id}"/>
-          ${escapeHtml(u.name)} <span class="tiny">(${u.id})</span>
-        `;
-        usersEl.appendChild(label);
-      });
-    }
-    userFilter.addEventListener("input", () => {
-      const q = userFilter.value.trim().toLowerCase();
-      renderUsers(allUsers.filter(u => (u.name||"").toLowerCase().includes(q)));
-    });
-    selectAllUsers.addEventListener("change", () => {
-      usersEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = selectAllUsers.checked);
-    });
-
-    // ---------- sender mode toggle ----------
-    modeRadios.forEach(r => r.addEventListener("change", async () => {
-      if (mode()==="user") {
-        userTokenRow.style.display = "flex";
-        renderChannels(personal.ok ? personal.memberChannels : []);
-      } else {
-        userTokenRow.style.display = "none";
-        await loadChannelsBot();
-      }
-    }));
-
-    // ---------- verify personal token ----------
-    verifyBtn.onclick = async () => {
-      verifyBtn.disabled = true;
-      verifyNote.textContent = "検証中...";
-      try {
-        const userToken = userTokenInput.value.trim();
-        const teamId = teamIdInput.value.trim();
-        const r = await fetch("/api/personal/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userToken, teamId })
-        });
-        const j = await robustJsonResponse(r);
-        out.textContent = JSON.stringify(j, null, 2);
-        if (j.ok) {
-          personal = { ok:true, user:j.user, memberChannels:j.memberChannels, publicChannels:j.publicChannels, token:userToken, teamId:teamId };
-          verifyNote.textContent = `OK：${j.user.id} / 所属CH ${j.memberChannels.length}件`;
-          renderChannels(personal.memberChannels);
+          if (!perChannelMentions.has(c.id)) { perChannelMentions.set(c.id, { mode:"channel" }); savePlans(); }
+          applyPlanToUi(c.id, mention);
+          ok.textContent = summarizePlan(perChannelMentions.get(c.id));
         } else {
-          personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
-          verifyNote.textContent = `NG：${j.error || "verify_failed"}`;
-          renderChannels([]);
+          mention.style.display = "none";
+          ok.textContent = "";
+          perChannelMentions.delete(c.id);
+          savePlans();
         }
-      } catch (e) {
-        verifyNote.textContent = "エラー";
-      } finally {
-        verifyBtn.disabled = false;
+        saveSelectedChannels();
+      });
+
+      // radio change
+      mention.addEventListener("change", async (e) => {
+        if (e.target.name !== `m-${c.id}`) return;
+        const val = e.target.value; // "channel" | "user"
+        const plan = perChannelMentions.get(c.id) || { mode:"channel" };
+        const input = mention.querySelector(".mention-input");
+        const chips = mention.querySelector(".chips");
+        const suggest = mention.querySelector(".suggest");
+
+        if (val === "channel") {
+          perChannelMentions.set(c.id, { mode:"channel" });
+          input.value = ""; input.disabled = true; input.readOnly = true;
+          chips.innerHTML = ""; suggest.style.display = "none";
+        } else {
+          perChannelMentions.set(c.id, { mode:"user", users: (plan.users||[]) });
+          input.disabled = false; input.readOnly = false; input.focus();
+          await fetchChannelMembers(c.id);
+        }
+        savePlans();
+        ok.textContent = summarizePlan(perChannelMentions.get(c.id));
+        applyPlanToUi(c.id, mention);
+      });
+
+      // user search + chips
+      const input = mention.querySelector(".mention-input");
+      const suggest = mention.querySelector(".suggest");
+      const chips = mention.querySelector(".chips");
+
+      input.addEventListener("focus", async () => {
+        const plan = perChannelMentions.get(c.id);
+        if (!plan || plan.mode !== "user") return;
+        await fetchChannelMembers(c.id);
+        showMemberSuggestions(c.id, (input.value||"").trim().toLowerCase(), input, suggest, chips, ok);
+      });
+      input.addEventListener("input", () => {
+        const plan = perChannelMentions.get(c.id);
+        if (!plan || plan.mode !== "user") return;
+        const q = input.value.trim().toLowerCase();
+        showMemberSuggestions(c.id, q, input, suggest, chips, ok);
+      });
+      input.addEventListener("blur", () => {
+        setTimeout(()=>{ if (!suggest.matches(":hover")) suggest.style.display="none"; }, 80);
+      });
+
+      row.appendChild(cb);
+      row.appendChild(label);
+      row.appendChild(ok);
+      row.appendChild(mention);
+      listEl.appendChild(row);
+
+      // 初期復元
+      if (cb.checked) {
+        mention.style.display = "flex";
+        if (!perChannelMentions.has(c.id)) perChannelMentions.set(c.id, { mode:"channel" });
+        applyPlanToUi(c.id, mention);
+        ok.textContent = summarizePlan(perChannelMentions.get(c.id));
       }
-    };
+    });
+  }
 
-    // ---------- send ----------
-    document.getElementById("sendBtn").onclick = async () => {
-      const message = document.getElementById("message").value;
+  function summarizePlan(plan) {
+    if (!plan) return "";
+    if (plan.mode === "channel") return "✅ @channel";
+    const n = (plan.users||[]).length;
+    if (n === 0) return "⚠️ 指定ユーザー未選択";
+    if (n === 1) return `✅ ${plan.users[0].name || plan.users[0].id}`;
+    return `✅ 指定ユーザー ${n}名`;
+  }
+
+  function applyPlanToUi(chId, root) {
+    const plan = perChannelMentions.get(chId) || { mode:"channel" };
+    const rChannel = root.querySelector(`input[name="m-${chId}"][value="channel"]`);
+    const rUser = root.querySelector(`input[name="m-${chId}"][value="user"]`);
+    const input = root.querySelector(".mention-input");
+    const chips = root.querySelector(".chips");
+
+    rChannel.checked = plan.mode === "channel";
+    rUser.checked = plan.mode === "user";
+
+    if (plan.mode === "user") {
+      input.disabled = false; input.readOnly = false;
+      input.value = (plan.users || []).map(u => u.name || u.id).join(", ");
+      chips.innerHTML = "";
+      (plan.users || []).forEach(u => {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.innerHTML = `${escapeHtml(u.name || u.id)} <button title="削除" aria-label="削除">×</button>`;
+        chip.querySelector("button").onclick = () => {
+          const next = (plan.users || []).filter(x => x.id !== u.id);
+          perChannelMentions.set(chId, { mode:"user", users: next });
+          savePlans();
+          applyPlanToUi(chId, root);
+        };
+        chips.appendChild(chip);
+      });
+    } else {
+      input.value = ""; input.disabled = true; input.readOnly = true;
+      chips.innerHTML = "";
+    }
+  }
+
+  function showMemberSuggestions(chId, q, inputEl, suggestEl, chipsEl, okEl) {
+    const key = `${getMode()}:${chId}`;
+    const members = channelMembersCache.get(key) || [];
+    const list = (!q ? members : members.filter(m => (m.name||"").toLowerCase().includes(q))).slice(0,100);
+    if (list.length === 0) { suggestEl.style.display="none"; suggestEl.innerHTML=""; return; }
+    suggestEl.innerHTML = "";
+    list.forEach(m => {
+      const div = document.createElement("div");
+      div.className = "suggest-item";
+      div.innerHTML = `${escapeHtml(m.name)} <span class="suggest-id">${m.id}</span>`;
+      div.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const plan = perChannelMentions.get(chId) || { mode: "user", users: [] };
+        const exists = (plan.users || []).some(u => u.id === m.id);
+        const next = exists ? plan.users : [...(plan.users || []), { id: m.id, name: m.name }];
+        perChannelMentions.set(chId, { mode: "user", users: next });
+        savePlans();
+      
+        // ✅ 検索欄をクリア
+        inputEl.value = "";
+        // ✅ 候補一覧を非表示
+        suggestEl.style.display = "none";
+      
+        // 以下チップ更新処理はそのまま
+        chipsEl.innerHTML = "";
+        (next || []).forEach(u => {
+          const chip = document.createElement("span");
+          chip.className = "chip";
+          chip.innerHTML = `${escapeHtml(u.name || u.id)} <button title="削除" aria-label="削除">×</button>`;
+          chip.querySelector("button").onclick = () => {
+            const cur = perChannelMentions.get(chId);
+            const nx = (cur.users || []).filter(x => x.id !== u.id);
+            perChannelMentions.set(chId, { mode: "user", users: nx });
+            savePlans();
+            inputEl.value = (nx || []).map(u2 => u2.name || u2.id).join(", ");
+            chipsEl.innerHTML = "";
+            (nx || []).forEach(u2 => {
+              const chip2 = document.createElement("span");
+              chip2.className = "chip";
+              chip2.innerHTML = `${escapeHtml(u2.name || u2.id)} <button title="削除" aria-label="削除">×</button>`;
+              chip2.querySelector("button").onclick = () => {
+                const cur2 = perChannelMentions.get(chId);
+                const nx2 = (cur2.users || []).filter(x => x.id !== u2.id);
+                perChannelMentions.set(chId, { mode: "user", users: nx2 });
+                savePlans();
+                inputEl.value = (nx2 || []).map(u3 => u3.name || u3.id).join(", ");
+                showMemberSuggestions(chId, "", inputEl, suggestEl, chipsEl, okEl);
+              };
+              chipsEl.appendChild(chip2);
+            });
+            okEl.textContent = summarizePlan(perChannelMentions.get(chId));
+          };
+          chipsEl.appendChild(chip);
+        });
+      
+        okEl.textContent = summarizePlan(perChannelMentions.get(chId));
+      });
+      
+
+
+      suggestEl.appendChild(div);
+    });
+    suggestEl.style.display = "block";
+  }
+
+  filterInput.addEventListener("input", () => {
+    const q = filterInput.value.trim().toLowerCase();
+    const src = currentChannelSource();
+    renderChannels(src.filter(c => (c.name||"").toLowerCase().includes(q)));
+  });
+  selectAll.addEventListener("change", () => {
+    listEl.querySelectorAll('input[type="checkbox"][id^="ch-"]').forEach(cb => {
+      cb.checked = selectAll.checked;
+      cb.dispatchEvent(new Event("change"));
+    });
+    saveSelectedChannels();
+  });
+
+  // users (DM)
+  async function loadUsers() {
+    const r = await fetch("/api/users");
+    const list = await r.json();
+    allUsers = list;
+    allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
+    renderUsers(allUsers);
+  }
+  function renderUsers(items) {
+    usersEl.innerHTML = "";
+    items.forEach(u => {
+      const id = `u-${u.id}`;
+      const label = document.createElement("label");
+      label.style.display = "block"; label.style.padding = "6px 4px";
+      label.innerHTML = `<input type="checkbox" id="${id}" value="${u.id}"/> ${escapeHtml(u.name)} <span class="tiny">(${u.id})</span>`;
+      usersEl.appendChild(label);
+    });
+  }
+  userFilter.addEventListener("input", () => {
+    const q = userFilter.value.trim().toLowerCase();
+    renderUsers(allUsers.filter(u => (u.name||"").toLowerCase().includes(q)));
+  });
+  selectAllUsers.addEventListener("change", () => {
+    usersEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = selectAllUsers.checked);
+  });
+
+  // sender mode
+  modeRadios.forEach(r => r.addEventListener("change", async () => {
+    if (getMode()==="user") {
+      userTokenRow.style.display = "flex";
+      renderChannels(personal.ok ? personal.memberChannels : []);
+    } else {
+      userTokenRow.style.display = "none";
+      renderChannels(allChannels);
+    }
+  }));
+
+  // verify
+  verifyBtn.onclick = async () => {
+    verifyBtn.disabled = true; verifyNote.textContent = "検証中...";
+    try {
+      const userToken = userTokenInput.value.trim();
+      const teamId = teamIdInput.value.trim();
+      const r = await fetch("/api/personal/verify", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ userToken, teamId })
+      });
+      const j = await robustJsonResponse(r);
+      out.textContent = JSON.stringify(j, null, 2);
+      if (j.ok) {
+        personal = { ok:true, user:j.user, memberChannels:j.memberChannels, publicChannels:j.publicChannels, token:userToken, teamId };
+        verifyNote.textContent = `OK：${j.user.id} / CH ${j.memberChannels.length}件`;
+        renderChannels(personal.memberChannels);
+      } else {
+        personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
+        verifyNote.textContent = `NG：${j.error || "verify_failed"}`;
+        renderChannels([]);
+      }
+    } catch {
+      verifyNote.textContent = "エラー";
+    } finally { verifyBtn.disabled = false; }
+  };
+
+  // 送信（プレビューを表示）
+  document.getElementById("sendBtn").onclick = async () => {
+    const message = (document.getElementById("message").value || "").trim();
+    const summary = document.getElementById("summary").value;
+    const chChecked = listEl.querySelectorAll('input[type="checkbox"][id^="ch-"]:checked');
+    const channelIds = Array.from(chChecked).map(cb => cb.value);
+    const uChecked = usersEl.querySelectorAll('input[type="checkbox"]:checked');
+    const userIds = Array.from(uChecked).map(cb => cb.value);
+
+    if (!message) { out.textContent = "本文を入力してください。"; return; }
+    if (channelIds.length === 0 && userIds.length === 0) { out.textContent = "送信先を選択してください。"; return; }
+
+    // バリデーション：各CHは channel か user のどちらか必須。userの場合は1件以上必要。
+    for (const ch of channelIds) {
+      const p = perChannelMentions.get(ch);
+      if (!p || !p.mode) { out.textContent = `チャンネル ${ch} のメンションを選択してください。`; return; }
+      if (p.mode === "user" && (!(p.users && p.users.length))) {
+        out.textContent = `チャンネル ${ch} の指定ユーザーを1件以上選択してください。`; return;
+      }
+    }
+
+    // プレビュー描画
+    previewChannels.innerHTML = channelIds.map(id => {
+      const src = currentChannelSource();
+      const ch = src.find(c => c.id === id);
+      const name = ch ? ch.name : id;
+      const p = perChannelMentions.get(id);
+      const label = p.mode === "channel"
+        ? `<span class="pill-small">@channel</span>`
+        : (p.users||[]).map(u => `<span class="pill-small">${escapeHtml(u.name || u.id)}</span>`).join(" ");
+      return `<div>• #${escapeHtml(name)} ${label}</div>`;
+    }).join("") || "<span class='tiny'>(なし)</span>";
+
+    previewDMs.innerHTML = userIds.map(id => {
+      const u = allUsers.find(x => x.id === id);
+      return `<div>• ${escapeHtml(u ? u.name : id)}</div>`;
+    }).join("") || "<span class='tiny'>(なし)</span>";
+
+    previewMessage.textContent = message;
+    previewSummary.textContent = summary || "(なし)";
+    openModal();
+  };
+
+  // プレビューから確定送信
+  confirmSendBtn.onclick = async () => {
+    confirmSendBtn.disabled = true;
+    out.textContent = "送信中...";
+    try {
+      const message = (document.getElementById("message").value || "").trim();
       const summary = document.getElementById("summary").value;
-
-      const chChecked = listEl.querySelectorAll('input[type="checkbox"]:checked');
+      const chChecked = listEl.querySelectorAll('input[type="checkbox"][id^="ch-"]:checked');
       const channelIds = Array.from(chChecked).map(cb => cb.value);
       const uChecked = usersEl.querySelectorAll('input[type="checkbox"]:checked');
       const userIds = Array.from(uChecked).map(cb => cb.value);
 
-      if (!message.trim()) { out.textContent = "本文を入力してください。"; return; }
-      if (channelIds.length === 0 && userIds.length === 0) { out.textContent = "送信先を選択してください。"; return; }
-      for (const ch of channelIds) {
-        const m = perChannelMentions.get(ch);
-        if (!m || !m.mode || (m.mode === "user" && !m.userId)) {
-          out.textContent = `チャンネル ${ch} のメンションを選択してください。`;
-          return;
-        }
+      const body = {
+        message, summary, channelIds, userIds,
+        autoJoinPublic: document.getElementById("autoJoin").checked,
+        perChannelMentions: Object.fromEntries(perChannelMentions.entries()),
+        mode: getMode()
+      };
+      if (getMode()==="user" && personal.ok) {
+        body.userToken = personal.token; if (personal.teamId) body.teamId = personal.teamId;
       }
 
-      // preview
-      previewChannels.innerHTML = channelIds.map(id => {
-        const src = currentChannelSource();
-        const ch = src.find(c => c.id === id);
-        const name = ch ? ch.name : id;
-        const m = perChannelMentions.get(id);
-        const mentionLabel =
-          m.mode === "user"
-            ? `<span class="pill-small">${escapeHtml(m.userName || m.userId)}</span>`
-            : `<span class="pill-small">@${m.mode}</span>`;
-        return `<div>• #${escapeHtml(name)} ${mentionLabel}</div>`;
-      }).join("") || "<span class='muted'>(なし)</span>";
-
-      previewDMs.innerHTML = userIds.map(id => {
-        const u = allUsers.find(x => x.id === id);
-        return `<div>• ${escapeHtml(u ? u.name : id)}</div>`;
-      }).join("") || "<span class='muted'>(なし)</span>";
-
-      previewMessage.textContent = message;
-      previewSummary.textContent = summary || "(なし)";
-      openModal();
-    };
-
-    confirmSendBtn.onclick = async () => {
-      confirmSendBtn.disabled = true;
-      out.textContent = "送信中...";
-      try {
-        const message = document.getElementById("message").value;
-        const summary = document.getElementById("summary").value;
-        const chChecked = listEl.querySelectorAll('input[type="checkbox"]:checked');
-        const channelIds = Array.from(chChecked).map(cb => cb.value);
-        const uChecked = usersEl.querySelectorAll('input[type="checkbox"]:checked');
-        const userIds = Array.from(uChecked).map(cb => cb.value);
-
-        const perChannelMentionsObj = {};
-        for (const [k, v] of perChannelMentions.entries()) perChannelMentionsObj[k] = v;
-
-        const body = {
-          message, summary, channelIds, userIds,
-          autoJoinPublic: document.getElementById("autoJoin").checked,
-          perChannelMentions: perChannelMentionsObj,
-          mode: mode()
-        };
-        if (mode()==="user" && personal.ok) {
-          body.userToken = personal.token;
-          if (personal.teamId) body.teamId = personal.teamId;
-        }
-
-        const r = await fetch("/api/broadcast", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-
-        const resp = await robustJsonResponse(r);
-        out.textContent = JSON.stringify(resp, null, 2);
-        if (resp.ok) {
-          undoBtn.disabled = false;
-          lastIdEl.textContent = resp.broadcast_id ? `ID: ${resp.broadcast_id}` : "";
-          closeModalFn();
-        }
-      } catch (e) {
-        out.textContent = "送信に失敗しました: " + e;
-      } finally {
-        confirmSendBtn.disabled = false;
+      const r = await fetch("/api/broadcast", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(body)
+      });
+      const resp = await robustJsonResponse(r);
+      out.textContent = JSON.stringify(resp, null, 2);
+      if (resp.ok) {
+        undoBtn.disabled = false;
+        lastIdEl.textContent = resp.broadcast_id ? `ID: ${resp.broadcast_id}` : "";
+        closeModalFn();
       }
-    };
+    } catch (e) {
+      out.textContent = "送信に失敗しました: " + e;
+    } finally {
+      confirmSendBtn.disabled = false;
+    }
+  };
 
-    // ---------- undo ----------
-    undoBtn.onclick = async () => {
-      undoBtn.disabled = true;
-      out.textContent = "取り消し中...";
-      try {
-        const r = await fetch("/api/broadcast/undo-last", { method: "POST" });
-        const j = await robustJsonResponse(r);
-        out.textContent = JSON.stringify(j, null, 2);
-        if (j.ok) { lastIdEl.textContent = ""; }
-      } catch (e) {
-        out.textContent = "取り消しに失敗しました: " + e;
+  // 取り消し
+  undoBtn.onclick = async () => {
+    undoBtn.disabled = true; out.textContent = "取り消し中...";
+    const r = await fetch("/api/broadcast/undo-last", { method:"POST" });
+    const j = await robustJsonResponse(r);
+    out.textContent = JSON.stringify(j, null, 2);
+    if (j.ok) lastIdEl.textContent = "";
+  };
+
+  // init
+  (async function init(){
+    loadPlans();
+    const savedCh = loadSelectedChannels();
+
+    await loadChannelsBot();
+    await loadUsers();
+
+    // 復元
+    listEl.querySelectorAll('input[type="checkbox"][id^="ch-"]').forEach(cb => {
+      if (savedCh.has(cb.value)) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event("change"));
       }
-    };
+    });
 
-    // ---------- init ----------
-    (async function init(){
-      await loadChannelsBot();
-      await loadUsers();
-
-      userTokenInput.value = localStorage.getItem("xoxp") || "";
-      teamIdInput.value = localStorage.getItem("teamId") || "";
-    })();
-  </script>
+    userTokenInput.value = localStorage.getItem("xoxp") || "";
+    teamIdInput.value = localStorage.getItem("teamId") || "";
+  })();
+</script>
 </body>
 </html>
