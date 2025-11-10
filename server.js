@@ -139,10 +139,10 @@ app.post("/api/personal/verify", async (req, res, next) => {
 // plan = { mode:"channel"|"user", users?:[{id,name}] }
 function buildTextWithPlan(text, plan) {
   if (!plan || !plan.mode) return text;
-  if (plan.mode === "channel") return `<!channel> ${text}`;
+  if (plan.mode === "channel") return `<!channel>\ n ${text}`;
   if (plan.mode === "user") {
     const ids = (plan.users || []).map(u => u.id).filter(Boolean);
-    if (ids.length) return `${ids.map(id => `<@${id}>`).join(" ")} ${text}`;
+    if (ids.length) return `${ids.map(id => `<@${id}>`).join(" ")} \n ${text}`;
   }
   return text;
 }
