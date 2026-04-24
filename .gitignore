@@ -1,16 +1,14 @@
 # 環境変数・秘密情報
 .env
 
-# DB
+# DB（SQLite本体・WAL・SHM すべて除外）
 data.db
 *.db
-
+*.db-wal
+*.db-shm
 
 # Node
 node_modules
 npm-debug.log*
 .yarn/*
 .DS_Store
-.env
-data.db
-*.db
