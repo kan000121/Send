@@ -56,4 +56,4 @@ npm start
 
 ## ライセンス
 
-Private / 社内利用
+MIT License — 個人プロジェクト
