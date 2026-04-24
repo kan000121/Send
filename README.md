@@ -15,10 +15,7 @@
 
 - **Backend**: Node.js 20 / Express
 - **Slack 連携**: `@slack/web-api`
-- **DB**: better-sqlite3（SQLite）
-- **Storage**: AWS S3（`@aws-sdk/client-s3`、presigned URL）
-- **Frontend**: HTML + TSX (`ChannelsPicker.tsx`)
-- **Auth**: express-basic-auth
+- **Frontend**: HTML + Vanilla JS（単一の `public/index.html`）
 
 ## セットアップ
 
@@ -26,7 +23,7 @@
 git clone https://github.com/kan000121/Send.git
 cd Send
 npm install
-cp .env.example .env   # 必要な値を設定
+# .env を作成し、SLACK_BOT_TOKEN を設定
 npm start
 ```
 
