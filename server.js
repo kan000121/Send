@@ -7,6 +7,7 @@ import basicAuth from "express-basic-auth";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { WebClient } from "@slack/web-api";
+import { isHashed, parseHash, verifyHash } from "./lib/password.js";
 
 dotenv.config();
 
@@ -22,6 +23,7 @@ const FORCE_HTTPS = process.env.FORCE_HTTPS === "1";
 
 // 利用者ごとの Basic 認証アカウント（監査ログで送信者を識別するため）
 // BASIC_AUTH_USERS="alice:pass1,bob:pass2"。旧形式の BASIC_AUTH_USER / BASIC_AUTH_PASS も可
+// パスワードは `npm run hash-password` で作った scrypt$... 形式でも指定できる（推奨）
 function loadAuthUsers() {
   const users = {};
   for (const pair of (process.env.BASIC_AUTH_USERS || "").split(",")) {
@@ -35,6 +37,19 @@ function loadAuthUsers() {
 }
 const AUTH_USERS = loadAuthUsers();
 const HAS_AUTH = Object.keys(AUTH_USERS).length > 0;
+for (const [user, stored] of Object.entries(AUTH_USERS)) {
+  if (!isHashed(stored)) continue;
+  const parsed = parseHash(stored);
+  if (!parsed) {
+    console.error(`[ERROR] ユーザー ${user} のパスワードハッシュの形式が不正です`);
+    process.exit(1);
+  }
+  AUTH_USERS[user] = parsed;
+}
+const plainUsers = Object.keys(AUTH_USERS).filter(u => typeof AUTH_USERS[u] === "string");
+if (plainUsers.length) {
+  console.warn(`[WARN] 平文のパスワードが設定されています（${plainUsers.join(", ")}）。npm run hash-password でハッシュ化を推奨`);
+}
 // Render 等の PaaS では localhost 待受だと外部から届かず原因不明のデプロイ失敗になるため、明示的に止める
 if (!HAS_AUTH && process.env.RENDER) {
   console.error("[ERROR] Render 上で起動するには BASIC_AUTH_USERS の設定が必要です（Environment で設定してください）");
@@ -91,9 +106,28 @@ const authFailureLimiter = rateLimit({
   standardHeaders: "draft-7", legacyHeaders: false,
   message: { ok:false, error:"too_many_auth_failures" },
 });
+// Basic 認証は毎リクエスト照合するため、scrypt の成功結果を短時間キャッシュする
+// キーはプロセスごとの乱数鍵による HMAC（パスワードそのものはメモリに残さない）
+const authCacheKey = crypto.randomBytes(32);
+const authCache = new Map(); // HMAC -> 有効期限
+const AUTH_CACHE_TTL = 10 * 60 * 1000;
+const DUMMY_HASH = parseHash(`scrypt$16384$8$1$${"A".repeat(22)}$${"A".repeat(43)}`);
+function checkPassword(user, password) {
+  const stored = Object.hasOwn(AUTH_USERS, user) ? AUTH_USERS[user] : null;
+  if (typeof stored === "string") return basicAuth.safeCompare(password, stored);
+  const key = crypto.createHmac("sha256", authCacheKey).update(`${user}\0${password}`).digest("base64");
+  if ((authCache.get(key) || 0) > Date.now()) return true;
+  // 存在しないユーザーでも同じだけ計算して、応答時間からユーザー名を推測されないようにする
+  const ok = verifyHash(password, stored || DUMMY_HASH) && !!stored;
+  if (ok) {
+    if (authCache.size >= 100) authCache.delete(authCache.keys().next().value);
+    authCache.set(key, Date.now() + AUTH_CACHE_TTL);
+  }
+  return ok;
+}
 if (HAS_AUTH) {
   app.use(authFailureLimiter);
-  app.use(basicAuth({ users: AUTH_USERS, challenge: true, realm: "Send" }));
+  app.use(basicAuth({ authorizer: checkPassword, challenge: true, realm: "Send" }));
 } else {
   console.warn("[WARN] BASIC_AUTH_USERS 未設定のため 127.0.0.1 のみで待受します");
 }
