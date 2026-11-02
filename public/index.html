@@ -449,9 +449,9 @@
     el("div", { class:"empty" }, loading ? el("span", { class:"spinner", "aria-hidden":"true" }) : null, text);
   // 一覧の取得失敗を、原因（Slack のエラーコード）付きで一覧内に表示する
   const LOAD_ERROR_HINT = {
-    no_token: "サーバーの .env に SLACK_BOT_TOKEN を設定して再起動してください。",
-    missing_scope: "Bot トークンに users:read / channels:read などのスコープを追加し、アプリを再インストールしてください。",
-    invalid_auth: "SLACK_BOT_TOKEN が正しいか確認してください。",
+    no_token: "個人として送信する場合は、上でトークンを「確認」してください。Bot を使う場合は、サーバーの .env に SLACK_BOT_TOKEN を設定して再起動してください。",
+    missing_scope: "トークン（個人トークンまたは Bot）に users:read / channels:read などのスコープを追加し、Slack アプリを再インストールしてください。",
+    invalid_auth: "トークンが正しいか確認してください（Bot の場合はサーバーの SLACK_BOT_TOKEN）。",
     token_revoked: "Slack アプリを再インストールして、新しい Bot トークンを設定してください。",
   };
   const loadErrorState = (what, code) => el("div", { class:"empty" },
@@ -699,20 +699,32 @@
   });
 
   // ---------- DM 宛先 ----------
+  // 個人モードでは個人トークンで取得（権限が無ければサーバー側で Bot にフォールバック）
+  let usersRequestSeq = 0;
   async function loadUsers() {
+    const seq = ++usersRequestSeq;
+    const useToken = getMode() === "user" && personal.ok;
+    usersLoading = true; usersError = "";
+    renderUsers();
+    let list, error = "";
     try {
-      const r = await api("/api/users");
-      const list = await robustJsonResponse(r);
-      if (!Array.isArray(list)) throw new Error(list.error);
+      const r = await api(`/api/users?mode=${useToken ? "user" : "bot"}`, {
+        headers: useToken ? { "x-user-token": personal.token } : {}
+      });
+      list = await robustJsonResponse(r);
+      if (!Array.isArray(list)) error = list.error || "load_failed";
+    } catch {
+      error = "network_error";
+    }
+    if (seq !== usersRequestSeq) return; // 後から出したリクエストを優先
+    usersLoading = false;
+    if (error) {
+      usersError = error; // 原因は一覧内に表示する
+    } else {
       allUsers = list;
       allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
-    } catch (e) {
-      usersError = e.message || "network_error";
-      toast(`ユーザー一覧を取得できませんでした：${errText(usersError)}`, "err");
-    } finally {
-      usersLoading = false;
-      renderUsers();
     }
+    renderUsers();
   }
   function renderUsers() {
     if (usersLoading) { usersEl.replaceChildren(emptyState("読み込み中…", true)); return updateCounts(); }
@@ -751,8 +763,7 @@
       if (!Array.isArray(list)) throw new Error(list.error);
       allChannels = list;
     } catch (e) {
-      channelsError = e.message || "network_error";
-      toast(`チャンネル一覧を取得できませんでした：${errText(channelsError)}`, "err");
+      channelsError = e.message || "network_error"; // 原因は Bot モードの一覧内に表示する
     } finally {
       channelsLoading = false;
       renderChannels();
@@ -766,6 +777,7 @@
     $("autoJoinRow").hidden = user;
     renderChannels();
   }
+  modeRadios.forEach(r => r.addEventListener("change", loadUsers));
   modeRadios.forEach(r => r.addEventListener("change", applyMode));
 
   function setVerifyNote(text, type = "") {
@@ -789,6 +801,7 @@
       if (j.ok) {
         personal = { ok:true, user:j.user, memberChannels:j.memberChannels, publicChannels:j.publicChannels, token:userToken, teamId };
         channelMembersCache.clear();
+        loadUsers();
         setVerifyNote(`✓ ${j.user.name}（${j.user.id}）として送信できます。参加中のチャンネル ${j.memberChannels.length}件`, "ok");
         try { localStorage.setItem("teamId", teamId); } catch {}
       } else {

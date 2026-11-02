@@ -169,6 +169,30 @@ async function getBotDirectory() {
     .finally(() => { directoryLoading = null; });
   return directoryLoading;
 }
+// 個人トークンの名簿キャッシュ（トークンそのものではなくハッシュをキーにする）
+const userDirectoryCache = new Map(); // sha256(token) -> { at, users }
+async function getUserDirectory(userToken) {
+  const key = crypto.createHash("sha256").update(userToken).digest("hex");
+  const hit = userDirectoryCache.get(key);
+  if (hit && Date.now() - hit.at < DIRECTORY_TTL_MS) return hit.users;
+  const users = await fetchDirectory(new WebClient(userToken));
+  userDirectoryCache.set(key, { at: Date.now(), users });
+  while (userDirectoryCache.size > 20) userDirectoryCache.delete(userDirectoryCache.keys().next().value);
+  return users;
+}
+// 個人トークン → Bot の順に試す（個人トークンに users:read が無くても Bot で補う）
+async function getDirectory(userToken) {
+  const sources = [
+    ...(userToken ? [() => getUserDirectory(userToken)] : []),
+    ...(bot ? [getBotDirectory] : []),
+  ];
+  if (!sources.length) throw Object.assign(new Error("no_token"), { data: { error: "no_token" }, status: 503 });
+  let firstError;
+  for (const load of sources) {
+    try { return await load(); } catch (e) { firstError ??= e; }
+  }
+  throw firstError;
+}
 const displayName = (u) =>
   u.profile?.real_name?.trim() || u.profile?.display_name?.trim() || u.name || u.id;
 
@@ -193,8 +217,8 @@ app.get("/api/channels", async (req, res, next) => {
 // ------------- API: ユーザー一覧（DM用） -------------
 app.get("/api/users", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, { ok:false, error:"no_token" }, 503);
-    const users = (await getBotDirectory())
+    const mode = (req.query.mode || "bot").toLowerCase();
+    const users = (await getDirectory(mode === "user" ? userTokenFromHeader(req) : ""))
       .filter(u => !u.deleted && !u.is_bot)
       .map(u => ({ id:u.id, name: u.profile?.real_name || u.name || u.id }));
     safeJson(res, users);
@@ -223,7 +247,8 @@ app.get("/api/channel-members", async (req, res, next) => {
     } while (cursor);
 
     // 名前解決：メンバーごとの users.info ではなく名簿を一括取得して引く
-    const directory = bot ? await getBotDirectory() : await fetchDirectory(client);
+    // 名簿が取れなくてもメンバー一覧は返す（名前の代わりに ID を表示）
+    const directory = await getDirectory(client === bot ? "" : userToken).catch(() => []);
     const names = new Map(directory.map(u => [u.id, displayName(u)]));
     safeJson(res, ids.map(uid => ({ id: uid, name: names.get(uid) || uid })));
   } catch (e) { next(e); }
@@ -467,7 +492,7 @@ app.get("*", (req, res) => res.sendFile(path.join(process.cwd(), "public", "inde
 app.use((err, req, res, next) => {
   console.error(err);
   if (res.headersSent) return next(err);
-  const status = err?.data?.error ? 502 : (err?.status || 500);
+  const status = err?.status || (err?.data?.error ? 502 : 500);
   res.status(status).json({ ok:false, error: err?.data?.error || "internal_error" });
 });
 

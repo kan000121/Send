@@ -63,7 +63,7 @@ npm start
 ## 必要な Slack スコープ
 
 - Bot Token: `chat:write`, `chat:write.public`, `channels:read`, `groups:read`, `users:read`, `im:write`, `conversations.connect:read`
-- User Token（任意）: `channels:read`, `groups:read`, `chat:write`
+- User Token（任意）: `channels:read`, `groups:read`, `chat:write`, `users:read`（DM 宛先一覧。無い場合は Bot で取得）, `im:write`（DM 送信）
 
 ## ライセンス
 
