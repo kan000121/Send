@@ -5,7 +5,7 @@ const filterInput = $("filter"), userFilter = $("userFilter");
 const onlySelectedCh = $("onlySelectedCh"), onlySelectedUsers = $("onlySelectedUsers");
 const messageEl = $("message"), summaryEl = $("summary");
 const sendBtn = $("sendBtn"), undoBtn = $("undoBtn");
-const confirmModal = $("confirmModal"), undoModal = $("undoModal");
+const confirmModal = $("confirmModal"), undoModal = $("undoModal"), helpModal = $("helpModal");
 const confirmSendBtn = $("confirmSendBtn"), confirmUndoBtn = $("confirmUndoBtn");
 const modeRadios = [...document.querySelectorAll('input[name="senderMode"]')];
 const userTokenRow = $("userTokenRow"), userTokenInput = $("userToken"), teamIdInput = $("teamId");
@@ -16,6 +16,7 @@ const botVerifyBtn = $("botVerifyBtn"), botVerifyNote = $("botVerifyNote");
 const MAX_TEXT_LEN = 40000;
 const LS_SELECTED_CH = "selectedChannels_onlyChannelOrUsers";
 const LS_PLAN = "perChannelMentions_onlyChannelOrUsers";
+const LS_HELP_SEEN = "helpSeen_v1";
 
 // ---------- state ----------
 // 選択状態は DOM ではなくここで保持する（絞り込みで非表示でも選択は維持）
@@ -561,13 +562,59 @@ function closeModal(modal) {
   modal.hidden = true;
   lastFocus?.focus?.();
 }
-[confirmModal, undoModal].forEach(m => {
+[confirmModal, undoModal, helpModal].forEach(m => {
   m.addEventListener("click", (e) => { if (e.target === m || e.target.closest("[data-close]")) closeModal(m); });
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  const open = [confirmModal, undoModal].find(m => !m.hidden);
+  const open = [confirmModal, undoModal, helpModal].find(m => !m.hidden);
   if (open) closeModal(open);
+});
+
+// ---------- 使い方（スライド） ----------
+const slides = [...$("helpSlides").querySelectorAll(".slide")];
+const helpPrev = $("helpPrev"), helpNext = $("helpNext");
+const dots = slides.map((s, i) => {
+  const b = el("button", { type:"button", "aria-label":`${i + 1}ページ目：${s.querySelector("h3").lastChild.textContent.trim()}` });
+  b.addEventListener("click", () => showSlide(i));
+  return b;
+});
+$("helpDots").replaceChildren(...dots);
+let slideIndex = 0;
+
+function showSlide(i) {
+  slideIndex = Math.max(0, Math.min(slides.length - 1, i));
+  slides.forEach((s, j) => { s.hidden = j !== slideIndex; });
+  dots.forEach((d, j) => { if (j === slideIndex) d.setAttribute("aria-current", "step"); else d.removeAttribute("aria-current"); });
+  $("helpCount").textContent = `${slideIndex + 1} / ${slides.length}`;
+  helpPrev.disabled = slideIndex === 0;
+  if (helpPrev.disabled && document.activeElement === helpPrev) helpNext.focus();
+  helpNext.textContent = slideIndex === slides.length - 1 ? "はじめる" : "次へ";
+  $("helpSlides").scrollTop = 0;
+}
+function openHelp(i = 0) {
+  showSlide(i);
+  openModal(helpModal, helpNext);
+  try { localStorage.setItem(LS_HELP_SEEN, "1"); } catch {}
+}
+document.querySelectorAll("[data-help]").forEach(b =>
+  b.addEventListener("click", () => openHelp(Number(b.dataset.help) || 0)));
+helpPrev.addEventListener("click", () => showSlide(slideIndex - 1));
+helpNext.addEventListener("click", () => {
+  if (slideIndex === slides.length - 1) closeModal(helpModal);
+  else showSlide(slideIndex + 1);
+});
+helpModal.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight") showSlide(slideIndex + 1);
+  else if (e.key === "ArrowLeft") showSlide(slideIndex - 1);
+});
+let touchX = null;
+helpModal.addEventListener("touchstart", (e) => { touchX = e.touches[0].clientX; }, { passive:true });
+helpModal.addEventListener("touchend", (e) => {
+  if (touchX === null) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  touchX = null;
+  if (Math.abs(dx) > 50) showSlide(slideIndex + (dx < 0 ? 1 : -1));
 });
 
 // ---------- 送信 ----------
@@ -770,4 +817,7 @@ function renderResults(title, rows, raw) {
   renderUsers();
   verifyBot({ auto:true }); // サーバーに Bot トークンがあればそのまま使える
   loadUsers();
+  let helpSeen = true;
+  try { helpSeen = localStorage.getItem(LS_HELP_SEEN) === "1"; } catch {}
+  if (!helpSeen) openHelp();
 })();

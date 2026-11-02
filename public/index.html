@@ -174,6 +174,51 @@
            padding:10px 16px; border-radius:10px; font-size:14px; box-shadow:var(--shadow); background:var(--text); color:var(--surface); }
   .toast.err { background:var(--danger); color:#fff; }
 
+  /* ヘルプ（スライド） */
+  .header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .help-btn { flex:none; display:inline-flex; align-items:center; gap:6px; background:var(--surface); color:var(--text); border-color:var(--border-strong); }
+  .help-btn:hover { background:var(--surface-2); }
+  .help-btn .q { display:inline-grid; place-items:center; width:20px; height:20px; border-radius:50%; background:var(--primary); color:var(--on-primary); font-size:12px; }
+  .link { background:none; border:none; padding:0; color:var(--primary); font-weight:600; font-size:inherit; text-decoration:underline; text-underline-offset:2px; border-radius:2px; }
+  .modal.help { width:min(720px, 100%); }
+  .modal.help .body { display:block; min-height:min(420px, 60vh); }
+  .slide { display:grid; gap:14px; align-content:start; }
+  .slide:not([hidden]) { animation:slide-in .2s ease-out; }
+  @keyframes slide-in { from { opacity:0; transform:translateX(12px); } to { opacity:1; transform:none; } }
+  @media (prefers-reduced-motion: reduce) { .slide:not([hidden]) { animation:none; } }
+  .slide h3 { margin:0; font-size:20px; display:flex; align-items:center; gap:10px; }
+  .slide p { margin:0; }
+  .slide ul, .slide ol { margin:0; padding-left:1.4em; display:grid; gap:6px; }
+  .slide .lead { color:var(--muted); }
+  .flow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .flow-step { flex:1 1 120px; padding:12px; border-radius:10px; background:var(--surface-2); border:1px solid var(--border); text-align:center; font-size:14px; }
+  .flow-step strong { display:block; font-size:15px; }
+  .flow-step.last { background:var(--primary-soft); border-color:transparent; color:var(--primary); }
+  .flow-arrow { color:var(--muted); flex:none; }
+  @media (max-width:560px) { .flow { flex-direction:column; align-items:stretch; } .flow-arrow { text-align:center; transform:rotate(90deg); } }
+  .compare { display:grid; grid-template-columns:1fr; gap:12px; }
+  @media (min-width:560px) { .compare { grid-template-columns:1fr 1fr; } }
+  .compare > div { border:1px solid var(--border); border-radius:10px; padding:12px 14px; font-size:14px; }
+  .compare h4 { margin:0 0 8px; font-size:15px; }
+  .steps-list { counter-reset:s; list-style:none; padding:0 !important; gap:10px !important; }
+  .steps-list li { counter-increment:s; display:grid; grid-template-columns:26px 1fr; gap:10px; align-items:start; }
+  .steps-list li::before { content:counter(s); display:grid; place-items:center; width:26px; height:26px; border-radius:50%; background:var(--primary-soft); color:var(--primary); font-weight:700; font-size:13px; }
+  .ui { display:inline-block; padding:0 6px; border-radius:5px; border:1px solid var(--border-strong); background:var(--surface-2); font-size:13px; font-weight:600; white-space:nowrap; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.92em; padding:0 4px; border-radius:4px; background:var(--surface-2); }
+  .mock { border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--surface-2); font-size:14px; display:grid; gap:8px; }
+  .mock-post { display:grid; grid-template-columns:32px 1fr; gap:10px; }
+  .mock-avatar { width:32px; height:32px; border-radius:6px; background:var(--primary); }
+  .mock-thread { margin-left:42px; padding-left:10px; border-left:3px solid var(--border-strong); display:grid; gap:4px; }
+  .mock .codebox { background:var(--surface); font-size:12px; padding:6px 10px; }
+  .mock-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 10px; border-radius:8px; background:var(--primary-soft); }
+  .mock-row .seg span { cursor:default; }
+  .help-nav { justify-content:space-between !important; align-items:center; }
+  .dots { display:flex; gap:6px; flex-wrap:wrap; }
+  .dots button { width:10px; height:10px; padding:0; border-radius:50%; background:var(--border-strong); }
+  .dots button[aria-current="step"] { background:var(--primary); width:24px; border-radius:5px; }
+  .help-nav .nav-btns { display:flex; gap:8px; align-items:center; }
+  .slide-count { font-size:13px; color:var(--muted); min-width:3.5em; text-align:right; }
+
   .spinner { display:inline-block; width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
   @keyframes spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation:none; } }
@@ -182,8 +227,13 @@
 <body>
 
 <header class="app-header">
-  <h1>Slack 一斉送信</h1>
-  <p>複数のチャンネル・DM に同じメッセージをまとめて送信します</p>
+  <div class="header-row">
+    <div>
+      <h1>Slack 一斉送信</h1>
+      <p>複数のチャンネル・DM に同じメッセージをまとめて送信します</p>
+    </div>
+    <button id="helpBtn" type="button" class="help-btn" data-help="0"><span class="q" aria-hidden="true">?</span>使い方</button>
+  </div>
 </header>
 
 <main>
@@ -208,7 +258,7 @@
         <button id="verifyBtn" type="button" class="btn-primary">確認</button>
       </div>
       <p id="verifyNote" class="note" role="status"></p>
-      <p class="hint">トークンはサーバーに保存されません。ページを再読み込みしたら再入力してください。</p>
+      <p class="hint">トークンはサーバーに保存されません。ページを再読み込みしたら再入力してください。<button type="button" class="link" data-help="2">トークンの入手方法</button></p>
     </div>
     <div id="botTokenRow" hidden>
       <div class="token-row bot">
@@ -219,7 +269,7 @@
         <button id="botVerifyBtn" type="button" class="btn-primary">確認</button>
       </div>
       <p id="botVerifyNote" class="note" role="status"></p>
-      <p class="hint">Bot が参加しているチャンネルに Bot の名前で送信します。入力したトークンはサーバーに保存されません。</p>
+      <p class="hint">Bot が参加しているチャンネルに Bot の名前で送信します。入力したトークンはサーバーに保存されません。<button type="button" class="link" data-help="3">Bot トークンについて</button></p>
     </div>
   </section>
 
@@ -360,6 +410,147 @@
     <footer>
       <button type="button" class="btn-secondary" data-close>キャンセル</button>
       <button id="confirmUndoBtn" type="button" class="btn-danger">取り消す</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 使い方（スライド） -->
+<div id="helpModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="helpTitle" hidden>
+  <div class="modal help">
+    <header>
+      <h2 id="helpTitle">使い方</h2>
+      <button type="button" class="close" data-close aria-label="閉じる">✕</button>
+    </header>
+    <div class="body" id="helpSlides" aria-live="polite">
+      <section class="slide">
+        <h3>3ステップで一斉送信できます</h3>
+        <p class="lead">同じメッセージを、複数のチャンネルや DM にまとめて送れます。</p>
+        <div class="flow">
+          <div class="flow-step"><strong>① 送信者</strong>誰として送るか</div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><strong>② メッセージ</strong>本文を書く</div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><strong>③ 宛先</strong>送り先を選ぶ</div>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step last"><strong>確認して送信</strong>送信後の取り消しも可</div>
+        </div>
+        <p class="hint">「次へ」ボタン、← → キー、スワイプでページを移動できます。この説明は右上の <span class="ui">? 使い方</span> からいつでも開けます。</p>
+      </section>
+
+      <section class="slide" hidden>
+        <h3><span class="step">1</span>送信者を選ぶ</h3>
+        <p class="lead">画面上部の切り替えで、誰の名前で投稿するかを選びます。</p>
+        <div class="compare">
+          <div>
+            <h4>個人として送信 <span class="muted">（標準）</span></h4>
+            <ul>
+              <li>あなたの名前とアイコンで投稿されます</li>
+              <li>送れるのは、あなたが参加しているチャンネル</li>
+              <li><strong>ユーザートークン</strong>（<code>xoxp-</code> で始まる）が必要です</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Bot として送信</h4>
+            <ul>
+              <li>Bot の名前とアイコンで投稿されます</li>
+              <li>送れるのは、Bot が参加しているチャンネル</li>
+              <li>管理者がサーバーに設定済みなら、トークンの入力は不要です</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" hidden>
+        <h3>ユーザートークンの入手方法</h3>
+        <ol class="steps-list">
+          <li><span>ブラウザで <code>https://api.slack.com/apps</code> を開き、社内の送信用アプリを選びます。<span class="muted">どのアプリか分からない場合は、管理者に確認してください。</span></span></li>
+          <li><span>左のメニューから <span class="ui">OAuth &amp; Permissions</span> を開きます。</span></li>
+          <li><span><span class="ui">User OAuth Token</span>（<code>xoxp-</code> で始まる文字列）の <span class="ui">Copy</span> を押します。<span class="muted">トークンが表示されていない場合は、先に <span class="ui">Install to Workspace</span> を押してください。</span></span></li>
+          <li><span>この画面の「ユーザートークン」欄に貼り付けて <span class="ui">確認</span> を押します。「✓ ○○として送信できます」と表示されれば準備完了です。</span></li>
+        </ol>
+        <div class="alert warn">トークンはパスワードと同じです。チャットやメールで他の人に共有しないでください。</div>
+        <p class="hint">team_id は通常空欄で構いません。複数のワークスペースを使う Enterprise Grid の場合のみ、管理者に確認してください。トークンはサーバーに保存されないため、ページを再読み込みしたら再入力が必要です。</p>
+      </section>
+
+      <section class="slide" hidden>
+        <h3>Bot として送る場合</h3>
+        <ul>
+          <li>管理者がサーバーに Bot トークンを設定している場合は、<span class="ui">Bot として送信</span> を選ぶだけで使えます（「✓ Bot ○○ で送信できます」と表示されます）。</li>
+          <li>自分で入力する場合は、前のページと同じ <span class="ui">OAuth &amp; Permissions</span> にある <span class="ui">Bot User OAuth Token</span>（<code>xoxb-</code> で始まる）を貼り付けて <span class="ui">確認</span> を押します。</li>
+          <li>公開チャンネルは、宛先の下にある「Bot が自動で参加する」をオンにすれば、Bot が未参加でも送れます。</li>
+          <li>非公開チャンネルに送るには、そのチャンネルで <code>/invite @Bot名</code> を実行して Bot を招待しておいてください。</li>
+        </ul>
+      </section>
+
+      <section class="slide" hidden>
+        <h3><span class="step">2</span>メッセージを書く</h3>
+        <ul>
+          <li><strong>本文（必須）</strong>：チャンネルや DM に投稿されるメッセージです。</li>
+          <li><strong>案件概要（任意）</strong>：本文への<strong>スレッド返信</strong>として、コードブロックで投稿されます。<code>```</code> で囲む必要はありません。</li>
+        </ul>
+        <div class="mock" aria-label="投稿イメージ">
+          <div class="mock-post">
+            <div class="mock-avatar" aria-hidden="true"></div>
+            <div><strong>あなた</strong><br>@channel 新しい案件のご案内です。詳細はスレッドをご確認ください。</div>
+          </div>
+          <div class="mock-thread">
+            <span class="muted">スレッドの返信</span>
+            <div class="codebox mono">案件名：○○○○<br>期間：…<br>単価：…</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" hidden>
+        <h3><span class="step">3</span>宛先を選ぶ</h3>
+        <ul>
+          <li><strong>チャンネル</strong>：チェックを入れたチャンネルに投稿します。絞り込み欄で検索し、<span class="ui">表示中をすべて選択</span> でまとめて選ぶこともできます。</li>
+          <li>チャンネルごとに、メンションの種類を選べます。</li>
+        </ul>
+        <div class="mock" aria-label="チャンネル選択のイメージ">
+          <div class="mock-row">
+            <strong># general</strong>
+            <span class="seg small" aria-hidden="true"><label><span style="background:var(--surface);color:var(--text);font-weight:600;">@channel</span></label><label><span>指定ユーザー</span></label></span>
+          </div>
+          <span class="muted">@channel：チャンネル全員に通知 ／ 指定ユーザー：選んだ人だけにメンション</span>
+        </div>
+        <ul>
+          <li><strong>DM（任意）</strong>：選んだ人それぞれに、個別の DM として送ります。</li>
+          <li><span class="ui">選択中のみ表示</span> にチェックを入れると、選んだ宛先だけを確認できます。</li>
+        </ul>
+      </section>
+
+      <section class="slide" hidden>
+        <h3>確認して送信</h3>
+        <ol class="steps-list">
+          <li><span>画面下部の <span class="ui">内容を確認して送信</span> を押します。</span></li>
+          <li><span>確認画面で宛先と本文を見直し、<span class="ui">送信する</span> を押します。@channel を含む場合は注意が表示されます。</span></li>
+          <li><span>「送信結果」に、宛先ごとの成功・失敗が表示されます。</span></li>
+        </ol>
+        <p><strong>失敗したときのよくある原因</strong></p>
+        <ul>
+          <li>「チャンネルに参加していません」：チャンネルに参加するか、Bot を招待してください。</li>
+          <li>「トークンが無効です」「失効しています」：トークンを入手し直して、もう一度 <span class="ui">確認</span> してください。</li>
+          <li>「権限（スコープ）が不足しています」：アプリの設定が必要です。管理者に連絡してください。</li>
+        </ul>
+      </section>
+
+      <section class="slide" hidden>
+        <h3>送信を取り消す</h3>
+        <ul>
+          <li>画面下部の <span class="ui">送信を取り消す</span> を押すと、<strong>直前の送信</strong>をまとめて削除できます。</li>
+          <li>スレッドに付けた案件概要も一緒に削除されます。他の人が付けた返信は残ります。</li>
+          <li>一部の削除に失敗した場合は、もう一度押すと残りを再試行します。</li>
+        </ul>
+        <div class="alert warn">取り消せるのは、同じトークンで送った直前の 1 回だけです。サーバーが再起動すると取り消せなくなるため、間違いに気づいたらすぐに取り消してください。</div>
+      </section>
+    </div>
+    <footer class="help-nav">
+      <div class="dots" id="helpDots" aria-label="ページ"></div>
+      <div class="nav-btns">
+        <span id="helpCount" class="slide-count"></span>
+        <button id="helpPrev" type="button" class="btn-secondary">戻る</button>
+        <button id="helpNext" type="button" class="btn-primary">次へ</button>
+      </div>
     </footer>
   </div>
 </div>
