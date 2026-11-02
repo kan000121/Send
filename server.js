@@ -71,6 +71,12 @@ const bot = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
 app.disable("x-powered-by");
 if (TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
 
+// ------------- ヘルスチェック -------------
+// Render などのヘルスチェックは認証情報なし・HTTP で来るため、HTTPS 強制と認証より前に置く
+app.get("/healthz", (req, res) => {
+  res.set("Cache-Control", "no-store").type("text/plain").send("ok");
+});
+
 // ------------- HTTPS 強制 -------------
 if (FORCE_HTTPS) {
   app.use((req, res, next) => {
