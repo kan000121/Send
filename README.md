@@ -34,12 +34,23 @@ npm start
 |---|---|
 | `SLACK_BOT_TOKEN` | (任意) 既定の Slack Bot Token（`xoxb-...`）。未設定でも画面から入力可能 |
 | `TEAM_ID` | (任意) 既定の Slack ワークスペースID |
-| `PORT` | サーバ待受ポート（デフォルト 3000） |
+| `PORT` | サーバ待受ポート（デフォルト 3000。Render などは自動で設定されるので指定不要） |
 | `BASIC_AUTH_USERS` | 利用者ごとの Basic 認証（`alice:pass1,bob:pass2`）。未設定時は `127.0.0.1` のみで待受。旧形式の `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` も可 |
 | `HOST` | (任意) 待受アドレスを明示指定 |
 | `TRUST_PROXY` | (任意) リバースプロキシの背後で運用する場合に設定（例: `1`） |
 | `FORCE_HTTPS` | (任意) `1` で HTTP→HTTPS リダイレクトと HSTS を有効化（`TRUST_PROXY` と併用） |
 | `AUDIT_LOG_FILE` | (任意) 監査ログ（JSON Lines）の追記先。未設定時は標準出力のみ |
+
+## Render へのデプロイ
+
+- Build Command: `npm install` / Start Command: `npm start`
+- `PORT` は Render が自動で渡す（既定 10000）ため設定不要
+- Environment に以下を設定する
+  - `BASIC_AUTH_USERS`（必須。未設定だと起動時にエラーで停止します）
+  - `TRUST_PROXY=1`、`FORCE_HTTPS=1`
+  - 必要に応じて `SLACK_BOT_TOKEN`、`TEAM_ID`
+- `AUDIT_LOG_FILE` は指定しない（ディスクは再デプロイで消えるため。監査ログは標準出力経由で Render の Logs に残る）
+- 無料プランはアクセスが無いとスリープし、再起動すると「直前の送信の取り消し」履歴が消える
 
 ## セキュリティ
 

@@ -35,6 +35,11 @@ function loadAuthUsers() {
 }
 const AUTH_USERS = loadAuthUsers();
 const HAS_AUTH = Object.keys(AUTH_USERS).length > 0;
+// Render 等の PaaS では localhost 待受だと外部から届かず原因不明のデプロイ失敗になるため、明示的に止める
+if (!HAS_AUTH && process.env.RENDER) {
+  console.error("[ERROR] Render 上で起動するには BASIC_AUTH_USERS の設定が必要です（Environment で設定してください）");
+  process.exit(1);
+}
 // 認証なしで外部公開しないよう、資格情報が無い場合は localhost のみで待受
 const HOST = process.env.HOST || (HAS_AUTH ? "0.0.0.0" : "127.0.0.1");
 if (!HAS_AUTH && !["127.0.0.1", "localhost", "::1"].includes(HOST)) {
