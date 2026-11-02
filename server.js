@@ -148,11 +148,24 @@ const isSlackId = (v) => typeof v === "string" && SLACK_ID_RE.test(v);
 const isIdList = (v) => Array.isArray(v) && v.length <= MAX_RECIPIENTS && v.every(isSlackId);
 // ユーザートークンはヘッダのみで受け取る（URL に載せるとログや履歴に残るため）
 const userTokenFromHeader = (req) => req.get("x-user-token") || "";
+// Bot トークン：画面から入力されたもの（x-bot-token）を優先し、無ければ .env の SLACK_BOT_TOKEN
+const botTokenFromHeader = (req) => req.get("x-bot-token") || "";
+const tokenError = (code, status = 400) => Object.assign(new Error(code), { data: { error: code }, status });
+function botFor(req) {
+  const token = botTokenFromHeader(req);
+  if (token) {
+    if (!token.startsWith("xoxb-")) throw tokenError("not_bot_token");
+    return { client: new WebClient(token), token };
+  }
+  if (bot) return { client: bot, token: SLACK_BOT_TOKEN };
+  return null;
+}
 
-// ワークスペースのユーザー名簿（users.list）を短時間キャッシュ
+// ワークスペースのユーザー名簿（users.list）をトークン単位で短時間キャッシュ
+// キーはトークンそのものではなくハッシュ
 const DIRECTORY_TTL_MS = 5 * 60 * 1000;
-let directoryCache = null; // { at, users:[slackUser] }
-let directoryLoading = null;
+const directoryCache = new Map(); // sha256(token) -> { at, users }
+const directoryLoading = new Map(); // sha256(token) -> Promise
 async function fetchDirectory(client) {
   const users = [];
   let cursor;
@@ -163,34 +176,28 @@ async function fetchDirectory(client) {
   } while (cursor);
   return users;
 }
-async function getBotDirectory() {
-  if (directoryCache && Date.now() - directoryCache.at < DIRECTORY_TTL_MS) return directoryCache.users;
-  directoryLoading ??= fetchDirectory(bot)
-    .then(users => { directoryCache = { at: Date.now(), users }; return users; })
-    .finally(() => { directoryLoading = null; });
-  return directoryLoading;
-}
-// 個人トークンの名簿キャッシュ（トークンそのものではなくハッシュをキーにする）
-const userDirectoryCache = new Map(); // sha256(token) -> { at, users }
-async function getUserDirectory(userToken) {
-  const key = crypto.createHash("sha256").update(userToken).digest("hex");
-  const hit = userDirectoryCache.get(key);
+async function getTokenDirectory(token) {
+  const key = crypto.createHash("sha256").update(token).digest("hex");
+  const hit = directoryCache.get(key);
   if (hit && Date.now() - hit.at < DIRECTORY_TTL_MS) return hit.users;
-  const users = await fetchDirectory(new WebClient(userToken));
-  userDirectoryCache.set(key, { at: Date.now(), users });
-  while (userDirectoryCache.size > 20) userDirectoryCache.delete(userDirectoryCache.keys().next().value);
-  return users;
+  if (!directoryLoading.has(key)) {
+    directoryLoading.set(key, fetchDirectory(new WebClient(token))
+      .then(users => {
+        directoryCache.set(key, { at: Date.now(), users });
+        while (directoryCache.size > 20) directoryCache.delete(directoryCache.keys().next().value);
+        return users;
+      })
+      .finally(() => directoryLoading.delete(key)));
+  }
+  return directoryLoading.get(key);
 }
 // 個人トークン → Bot の順に試す（個人トークンに users:read が無くても Bot で補う）
-async function getDirectory(userToken) {
-  const sources = [
-    ...(userToken ? [() => getUserDirectory(userToken)] : []),
-    ...(bot ? [getBotDirectory] : []),
-  ];
-  if (!sources.length) throw Object.assign(new Error("no_token"), { data: { error: "no_token" }, status: 503 });
+async function getDirectory(userToken, botToken) {
+  const tokens = [userToken, botToken].filter(Boolean);
+  if (!tokens.length) throw tokenError("no_token", 503);
   let firstError;
-  for (const load of sources) {
-    try { return await load(); } catch (e) { firstError ??= e; }
+  for (const token of tokens) {
+    try { return await getTokenDirectory(token); } catch (e) { firstError ??= e; }
   }
   throw firstError;
 }
@@ -200,11 +207,12 @@ const displayName = (u) =>
 // ------------- API: チャンネル一覧（bot視点） -------------
 app.get("/api/channels", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, { ok:false, error:"no_token" }, 503);
+    const b = botFor(req);
+    if (!b) return safeJson(res, { ok:false, error:"no_token" }, 503);
     const out = [];
     let cursor;
     do {
-      const r = await bot.conversations.list({
+      const r = await b.client.conversations.list({
         limit: 1000, cursor,
         types: "public_channel,private_channel"
       });
@@ -219,7 +227,7 @@ app.get("/api/channels", async (req, res, next) => {
 app.get("/api/users", async (req, res, next) => {
   try {
     const mode = (req.query.mode || "bot").toLowerCase();
-    const users = (await getDirectory(mode === "user" ? userTokenFromHeader(req) : ""))
+    const users = (await getDirectory(mode === "user" ? userTokenFromHeader(req) : "", botFor(req)?.token))
       .filter(u => !u.deleted && !u.is_bot)
       .map(u => ({ id:u.id, name: u.profile?.real_name || u.name || u.id }));
     safeJson(res, users);
@@ -234,7 +242,8 @@ app.get("/api/channel-members", async (req, res, next) => {
     const teamId = pickTeamIdFallback(req.query.teamId);
     const userToken = userTokenFromHeader(req);
 
-    const client = (mode === "user" && userToken) ? new WebClient(userToken) : bot;
+    const b = mode === "user" ? null : botFor(req);
+    const client = mode === "user" ? (userToken ? new WebClient(userToken) : null) : b?.client;
     if (!isSlackId(channel) || !client) return safeJson(res, [], 200);
 
     const ids = [];
@@ -249,9 +258,24 @@ app.get("/api/channel-members", async (req, res, next) => {
 
     // 名前解決：メンバーごとの users.info ではなく名簿を一括取得して引く
     // 名簿が取れなくてもメンバー一覧は返す（名前の代わりに ID を表示）
-    const directory = await getDirectory(client === bot ? "" : userToken).catch(() => []);
+    const directory = await getDirectory(mode === "user" ? userToken : "", b?.token).catch(() => []);
     const names = new Map(directory.map(u => [u.id, displayName(u)]));
     safeJson(res, ids.map(uid => ({ id: uid, name: names.get(uid) || uid })));
+  } catch (e) { next(e); }
+});
+
+// ------------- API: Bot トークン検証 -------------
+app.post("/api/bot/verify", verifyLimiter, async (req, res, next) => {
+  try {
+    const b = botFor(req);
+    if (!b) return safeJson(res, { ok:false, error:"no_token" }, 400);
+    const auth = await b.client.auth.test();
+    if (!auth.bot_id) return safeJson(res, { ok:false, error:"not_bot_token" }, 400);
+    safeJson(res, {
+      ok: true,
+      bot: { id: auth.user_id, name: auth.user },
+      fromServer: !botTokenFromHeader(req),
+    });
   } catch (e) { next(e); }
 });
 
@@ -344,15 +368,12 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
     }
 
     if (mode === "user" && !userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
-    const client = mode === "user" ? new WebClient(userToken) : bot;
+    const isBot = mode !== "user";
+    const client = isBot ? botFor(req)?.client : new WebClient(userToken);
     if (!client) return safeJson(res, { ok:false, error:"no_token" }, 400);
 
-    // user モードでは送信者を記録し、取り消し時に同一ユーザーか照合する
-    let senderUserId;
-    if (client !== bot) {
-      const auth = await client.auth.test();
-      senderUserId = auth.user_id;
-    }
+    // 送信者（個人 or Bot）を記録し、取り消し時に同一の送信者か照合する
+    const senderUserId = (await client.auth.test()).user_id;
 
     const effectiveTeam = pickTeamIdFallback(teamId);
     const results = [];
@@ -363,7 +384,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
       const plan = Object.hasOwn(perChannelMentions, ch) ? perChannelMentions[ch] : { mode:"channel" };
       const text = buildTextWithPlan(message, plan);
 
-      if (autoJoinPublic && client === bot && ch.startsWith("C")) {
+      if (autoJoinPublic && isBot && ch.startsWith("C")) {
         try { await client.conversations.join({ channel: ch }); } catch {}
       }
 
@@ -400,14 +421,14 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
     const broadcastId = `b${crypto.randomUUID()}`;
     broadcasts.set(broadcastId, {
       actor: req.auth?.user,
-      mode: client === bot ? "bot" : "user",
+      mode: isBot ? "bot" : "user",
       userId: senderUserId,
       results: sent
     });
     while (broadcasts.size > MAX_BROADCAST_HISTORY) broadcasts.delete(broadcasts.keys().next().value);
 
     audit(req, "broadcast", {
-      broadcastId, mode: client === bot ? "bot" : "user", slackUserId: senderUserId,
+      broadcastId, mode: isBot ? "bot" : "user", slackUserId: senderUserId,
       channels: channelIds, dms: userIds,
       messageSha256: messageDigest(message), messageLength: message.length,
       okCount: results.filter(r => r.ok).length, failCount: results.filter(r => !r.ok).length,
@@ -433,12 +454,12 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
       const userToken = userTokenFromHeader(req);
       if (!userToken) return res.status(401).json({ ok:false, error:"token_required" });
       client = new WebClient(userToken);
-      const auth = await client.auth.test();
-      if (auth.user_id !== target.userId) return res.status(403).json({ ok:false, error:"not_owner" });
     } else {
-      if (!bot) return res.status(400).json({ ok:false, error:"no_token" });
-      client = bot;
+      client = botFor(req)?.client;
+      if (!client) return res.status(400).json({ ok:false, error:"no_token" });
     }
+    const auth = await client.auth.test();
+    if (auth.user_id !== target.userId) return res.status(403).json({ ok:false, error:"not_owner" });
     const results = [];
 
     const remaining = [];

@@ -23,7 +23,7 @@
 git clone https://github.com/kan000121/Send.git
 cd Send
 npm install
-# .env を作成し、SLACK_BOT_TOKEN を設定
+# 必要に応じて .env を作成（Bot トークンは画面から入力することも可能）
 npm start
 ```
 
@@ -31,7 +31,7 @@ npm start
 
 | 変数名 | 説明 |
 |---|---|
-| `SLACK_BOT_TOKEN` | Slack Bot Token（`xoxb-...`） |
+| `SLACK_BOT_TOKEN` | (任意) 既定の Slack Bot Token（`xoxb-...`）。未設定でも画面から入力可能 |
 | `TEAM_ID` | (任意) 既定の Slack ワークスペースID |
 | `PORT` | サーバ待受ポート（デフォルト 3000） |
 | `BASIC_AUTH_USERS` | 利用者ごとの Basic 認証（`alice:pass1,bob:pass2`）。未設定時は `127.0.0.1` のみで待受。旧形式の `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` も可 |
@@ -45,7 +45,7 @@ npm start
 - 全ページ・API は Basic 認証で保護。外部公開時は TLS 終端プロキシの背後に置き、`TRUST_PROXY=1` `FORCE_HTTPS=1` を設定すること
 - 認証失敗は IP あたり 15 分 20 回まで。API は 1 分 120 回、送信・取り消しは 1 分 5 回、トークン検証は 1 分 10 回まで（アカウント単位）
 - API は `X-Requested-With: send` ヘッダ必須＋ Origin 検証で CSRF を防止
-- User Token はサーバに保存せず、`x-user-token` ヘッダ（またはPOSTボディ）でのみ受け取る
+- User Token / 画面から入力した Bot Token はサーバに保存せず、`x-user-token` / `x-bot-token` ヘッダ（User Token は POST ボディも可）でのみ受け取る
 - 取り消しは送信時に記録した自分の投稿（親メッセージ＋案件概要の返信）を直接削除する。スレッド内の他の返信は `*:history` 権限があれば削除を試みる。失敗した分は再度取り消し可能
 - 取り消しは `broadcastId` 指定。送信した Basic 認証アカウント本人のみ実行可能で、User Token 送信分は同一 Slack ユーザーのトークンが必要
 - 送信・取り消しは監査ログに記録（実行者・宛先・本文の SHA-256 先頭16桁と文字数。トークンと本文そのものは残さない）
@@ -57,6 +57,7 @@ npm start
 | GET | `/api/channels` | Bot が参加するチャンネル一覧 |
 | GET | `/api/users` | ワークスペースのユーザー一覧 |
 | GET | `/api/channel-members` | 指定CHのメンバー一覧（名前解決付き） |
+| POST | `/api/bot/verify` | Bot Token の検証（`x-bot-token` 未指定時はサーバー設定のトークン） |
 | POST | `/api/personal/verify` | User Token の検証 |
 | POST | `/api/broadcast` | 一斉送信を実行 |
 | POST | `/api/broadcast/undo-last` | 指定 `broadcastId` のブロードキャストを取り消し |
