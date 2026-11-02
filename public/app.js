@@ -16,7 +16,6 @@ const botVerifyBtn = $("botVerifyBtn"), botVerifyNote = $("botVerifyNote");
 const MAX_TEXT_LEN = 40000;
 const LS_SELECTED_CH = "selectedChannels_onlyChannelOrUsers";
 const LS_PLAN = "perChannelMentions_onlyChannelOrUsers";
-const LS_HELP_SEEN = "helpSeen_v1";
 
 // ---------- state ----------
 // 選択状態は DOM ではなくここで保持する（絞り込みで非表示でも選択は維持）
@@ -595,7 +594,6 @@ function showSlide(i) {
 function openHelp(i = 0) {
   showSlide(i);
   openModal(helpModal, helpNext);
-  try { localStorage.setItem(LS_HELP_SEEN, "1"); } catch {}
 }
 document.querySelectorAll("[data-help]").forEach(b =>
   b.addEventListener("click", () => openHelp(Number(b.dataset.help) || 0)));
@@ -817,7 +815,4 @@ function renderResults(title, rows, raw) {
   renderUsers();
   verifyBot({ auto:true }); // サーバーに Bot トークンがあればそのまま使える
   loadUsers();
-  let helpSeen = true;
-  try { helpSeen = localStorage.getItem(LS_HELP_SEEN) === "1"; } catch {}
-  if (!helpSeen) openHelp();
 })();
