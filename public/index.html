@@ -1004,7 +1004,11 @@
       j = { ok:false, error:"network_error" };
     }
     const labels = lastBroadcast.labels;
-    if (Array.isArray(j.results)) lastBroadcast = null;
+    if (Array.isArray(j.results)) {
+      // 失敗した分はサーバー側に残るので、もう一度取り消せるようにする
+      const failed = j.results.filter(r => !r.ok).length;
+      lastBroadcast = failed ? { ...lastBroadcast, count: failed } : null;
+    }
     setBusy(false, confirmUndoBtn);
     confirmUndoBtn.textContent = "取り消す";
 
@@ -1016,7 +1020,7 @@
     renderResults("取り消し結果", j.results.map(r => ({
       label: labels.get(r.channel) || r.channel, ok:r.ok, note: r.ok ? "削除しました" : errText(r.error)
     })), j);
-    toast(j.ok ? "送信を取り消しました" : "一部の取り消しに失敗しました", j.ok ? "" : "err");
+    toast(j.ok ? "送信を取り消しました" : "一部の取り消しに失敗しました。「送信を取り消す」で再試行できます", j.ok ? "" : "err");
   });
 
   // ---------- 結果表示 ----------

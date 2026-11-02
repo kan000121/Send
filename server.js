@@ -135,7 +135,8 @@ function audit(req, event, detail) {
 const messageDigest = (text) => crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 // 直近の送信履歴（トークンは保持しない）
-// id -> { actor, mode, userId?, results:[{channel,ts}] }
+// id -> { actor, mode, userId?, results:[{channel, ts, ownTs:[...]}] }
+// ownTs: 自分が投稿したメッセージ（親＋スレッドの案件概要）。取り消しはこれを直接削除する
 const broadcasts = new Map();
 const MAX_BROADCAST_HISTORY = 20;
 
@@ -305,6 +306,16 @@ function buildTextWithPlan(text, plan) {
   return text;
 }
 
+// 案件概要をスレッドに返信。失敗しても親メッセージの送信結果は成功のまま扱う
+async function postSummaryReply(client, record, summary) {
+  try {
+    const reply = await client.chat.postMessage({ channel: record.channel, thread_ts: record.ts, text: "```\n"+summary+"\n```" });
+    if (reply.ok) record.ownTs.push(reply.ts);
+  } catch (e) {
+    console.warn("案件概要の返信に失敗:", record.channel, e?.data?.error || e.message);
+  }
+}
+
 // ------------- API: 送信 -------------
 app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
   try {
@@ -345,6 +356,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
 
     const effectiveTeam = pickTeamIdFallback(teamId);
     const results = [];
+    const sent = []; // 取り消し用 [{ channel, ts, ownTs }]
 
     // CH メッセージ
     for (const ch of channelIds) {
@@ -359,13 +371,11 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
         const r = await client.chat.postMessage({
           channel: ch, text, ...(effectiveTeam ? { team: effectiveTeam } : {})
         });
-        results.push({ ok: r.ok, channel: ch, ts: r.ts });
+        results.push({ ok: r.ok, channel: r.channel, ts: r.ts });
+        const record = { channel: r.channel, ts: r.ts, ownTs: [r.ts] };
+        sent.push(record);
 
-        if (summary && r.ok) {
-          await client.chat.postMessage({
-            channel: r.channel, thread_ts: r.ts, text: "```\n"+summary+"\n```"
-          });
-        }
+        if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
         results.push({ ok:false, channel: ch, error: e?.data?.error || e.message });
       }
@@ -377,10 +387,10 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
       try {
         const im = await client.conversations.open({ users: uid, ...(effectiveTeam ? { team_id: effectiveTeam } : {}) });
         const r = await client.chat.postMessage({ channel: im.channel.id, text: message });
-        results.push({ ok: r.ok, channel: im.channel.id, ts: r.ts, dm_to: uid });
-        if (summary && r.ok) {
-          await client.chat.postMessage({ channel: r.channel, thread_ts: r.ts, text: "```\n"+summary+"\n```" });
-        }
+        results.push({ ok: r.ok, channel: r.channel, ts: r.ts, dm_to: uid });
+        const record = { channel: r.channel, ts: r.ts, ownTs: [r.ts] };
+        sent.push(record);
+        if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
         results.push({ ok:false, dm_to: uid, error: e?.data?.error || e.message });
       }
@@ -392,7 +402,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
       actor: req.auth?.user,
       mode: client === bot ? "bot" : "user",
       userId: senderUserId,
-      results: results.filter(r => r.ok && r.channel && r.ts).map(r => ({ channel:r.channel, ts:r.ts }))
+      results: sent
     });
     while (broadcasts.size > MAX_BROADCAST_HISTORY) broadcasts.delete(broadcasts.keys().next().value);
 
@@ -431,49 +441,50 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
     }
     const results = [];
 
-    for (const it of target.results) {
-      try {
-        let allMessages = [];
-        let cursor;
+    const remaining = [];
 
-        // 🔁 ページネーション付きで replies を全取得
+    for (const it of target.results) {
+      // 自分の投稿は記録済みの ts で直接削除する（スレッドの読み取り権限が無くても消せる）
+      const tsSet = new Set(it.ownTs || [it.ts]);
+      // スレッド内の他の返信も消せる範囲で消す（im:history 等が無ければスキップ）
+      try {
+        let cursor;
         do {
-          const r = await client.conversations.replies({
-            channel: it.channel,
-            ts: it.ts,
-            cursor,
-            limit: 200, // 最大値
-          });
-          allMessages = allMessages.concat(r.messages || []);
+          const r = await client.conversations.replies({ channel: it.channel, ts: it.ts, cursor, limit: 200 });
+          (r.messages || []).forEach(m => tsSet.add(m.ts));
           cursor = r.response_metadata?.next_cursor;
         } while (cursor);
-
-        // 親含めて全削除（新しい順で確実に消す）
-        for (const msg of [...allMessages].reverse()) {
-          try {
-            await client.chat.delete({
-              channel: it.channel,
-              ts: msg.ts,
-            });
-            await sleep(150);
-          } catch (e) {
-            console.warn("削除失敗:", e.data?.error || e.message);
-          }
-        }
-
-        results.push({ ok: true, channel: it.channel, ts: it.ts });
       } catch (e) {
-        results.push({
-          ok: false,
-          channel: it.channel,
-          ts: it.ts,
-          error: e?.data?.error || e.message,
-        });
+        console.warn("スレッド取得をスキップ:", it.channel, e?.data?.error || e.message);
+      }
+
+      // 新しい順に削除（親は最後）
+      const own = new Set(it.ownTs || [it.ts]);
+      const ordered = [...tsSet].sort((a, b) => Number(b) - Number(a));
+      let error;
+      for (const ts of ordered) {
+        try {
+          await client.chat.delete({ channel: it.channel, ts });
+        } catch (e) {
+          const code = e?.data?.error || e.message;
+          // 既に消えているものは成功扱い。他人の返信が消せないのは失敗にしない
+          if (code !== "message_not_found" && own.has(ts)) error ??= code;
+        }
+        await sleep(150);
+      }
+
+      if (error) {
+        results.push({ ok: false, channel: it.channel, ts: it.ts, error });
+        remaining.push(it);
+      } else {
+        results.push({ ok: true, channel: it.channel, ts: it.ts });
       }
       await sleep(300);
     }
 
-    broadcasts.delete(broadcastId);
+    // 失敗した分は再試行できるよう残す
+    if (remaining.length) target.results = remaining;
+    else broadcasts.delete(broadcastId);
     audit(req, "undo", {
       broadcastId, mode: target.mode, slackUserId: target.userId,
       okCount: results.filter(r => r.ok).length, failCount: results.filter(r => !r.ok).length,
