@@ -34,16 +34,36 @@ npm start
 |---|---|
 | `SLACK_BOT_TOKEN` | (任意) 既定の Slack Bot Token（`xoxb-...`）。未設定でも画面から入力可能 |
 | `TEAM_ID` | (任意) 既定の Slack ワークスペースID |
-| `PORT` | サーバ待受ポート（デフォルト 3000） |
-| `BASIC_AUTH_USERS` | 利用者ごとの Basic 認証（`alice:pass1,bob:pass2`）。未設定時は `127.0.0.1` のみで待受。旧形式の `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` も可 |
+| `PORT` | サーバ待受ポート（デフォルト 3000。Render などは自動で設定されるので指定不要） |
+| `BASIC_AUTH_USERS` | 利用者ごとの Basic 認証（`alice:pass1,bob:pass2`）。パスワードは `npm run hash-password` で作ったハッシュ（`alice:scrypt$...`）で指定するのを推奨。未設定時は `127.0.0.1` のみで待受。旧形式の `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` も可 |
 | `HOST` | (任意) 待受アドレスを明示指定 |
 | `TRUST_PROXY` | (任意) リバースプロキシの背後で運用する場合に設定（例: `1`） |
 | `FORCE_HTTPS` | (任意) `1` で HTTP→HTTPS リダイレクトと HSTS を有効化（`TRUST_PROXY` と併用） |
 | `AUDIT_LOG_FILE` | (任意) 監査ログ（JSON Lines）の追記先。未設定時は標準出力のみ |
 
+## パスワードのハッシュ化
+
+```bash
+npm run hash-password   # パスワードを2回入力（画面には表示されない）
+# → scrypt$16384$8$1$... が出力される
+```
+
+出力を `BASIC_AUTH_USERS=kanta:scrypt$16384$8$1$...` のように設定する（複数人はカンマ区切り。平文とハッシュの混在も可）。シェルで `export` する場合は `$` が展開されないようシングルクォートで囲むこと。`.env` と Render の Environment はそのままでよい。
+
+## Render へのデプロイ
+
+- Build Command: `npm install` / Start Command: `npm start`
+- `PORT` は Render が自動で渡す（既定 10000）ため設定不要
+- Environment に以下を設定する
+  - `BASIC_AUTH_USERS`（必須。未設定だと起動時にエラーで停止します。パスワードはハッシュ化して設定）
+  - `TRUST_PROXY=1`、`FORCE_HTTPS=1`
+  - 必要に応じて `SLACK_BOT_TOKEN`、`TEAM_ID`
+- `AUDIT_LOG_FILE` は指定しない（ディスクは再デプロイで消えるため。監査ログは標準出力経由で Render の Logs に残る）
+- 無料プランはアクセスが無いとスリープし、再起動すると「直前の送信の取り消し」履歴が消える
+
 ## セキュリティ
 
-- 全ページ・API は Basic 認証で保護。外部公開時は TLS 終端プロキシの背後に置き、`TRUST_PROXY=1` `FORCE_HTTPS=1` を設定すること
+- 全ページ・API は Basic 認証で保護。パスワードは scrypt ハッシュで設定でき、環境変数を見られても元のパスワードは分からない。外部公開時は TLS 終端プロキシの背後に置き、`TRUST_PROXY=1` `FORCE_HTTPS=1` を設定すること
 - 認証失敗は IP あたり 15 分 20 回まで。API は 1 分 120 回、送信・取り消しは 1 分 5 回、トークン検証は 1 分 10 回まで（アカウント単位）
 - API は `X-Requested-With: send` ヘッダ必須＋ Origin 検証で CSRF を防止
 - User Token / 画面から入力した Bot Token はサーバに保存せず、`x-user-token` / `x-bot-token` ヘッダ（User Token は POST ボディも可）でのみ受け取る
