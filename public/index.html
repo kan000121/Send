@@ -198,12 +198,15 @@
   const perChannelMentions = new Map();
   // cache
   const channelMembersCache = new Map();
+  let lastBroadcastId = null;
 
   const LS_SELECTED_CH = "selectedChannels_onlyChannelOrUsers";
   const LS_PLAN = "perChannelMentions_onlyChannelOrUsers";
 
   const getMode = () => modeRadios.find(r => r.checked)?.value || "user";
   const escapeHtml = (s="") => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  // API 呼び出しは必ず CSRF 対策ヘッダを付与する
+  const api = (url, opts = {}) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Requested-With": "send" } });
   const robustJsonResponse = (r) => r.text().then(raw => ((r.headers.get("content-type")||"").toLowerCase().includes("application/json") ? JSON.parse(raw) : { ok:false, error:"non_json_response", raw }));
 
   // persist
@@ -232,11 +235,8 @@
     if (channelMembersCache.has(key)) return channelMembersCache.get(key);
 
     const params = new URLSearchParams({ channel: chId, mode: getMode() });
-    if (getMode()==="user") {
-      if (personal.token) params.set("userToken", personal.token);
-      if (personal.teamId) params.set("teamId", personal.teamId);
-    }
-    const r = await fetch(`/api/channel-members?${params.toString()}`, {
+    if (getMode()==="user" && personal.teamId) params.set("teamId", personal.teamId);
+    const r = await api(`/api/channel-members?${params.toString()}`, {
       headers: getMode()==="user" && personal.token ? { "x-user-token": personal.token } : {}
     });
     const arr = await r.json();
@@ -248,7 +248,7 @@
   function currentChannelSource() { return (getMode()==="user" && personal.ok) ? personal.memberChannels : allChannels; }
 
   async function loadChannelsBot() {
-    const r = await fetch("/api/channels");
+    const r = await api("/api/channels");
     allChannels = await r.json();
     renderChannels(allChannels);
   }
@@ -485,7 +485,7 @@
 
   // users (DM)
   async function loadUsers() {
-    const r = await fetch("/api/users");
+    const r = await api("/api/users");
     const list = await r.json();
     allUsers = list;
     allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
@@ -526,7 +526,7 @@
     try {
       const userToken = userTokenInput.value.trim();
       const teamId = teamIdInput.value.trim();
-      const r = await fetch("/api/personal/verify", {
+      const r = await api("/api/personal/verify", {
         method:"POST", headers:{ "Content-Type":"application/json" },
         body: JSON.stringify({ userToken, teamId })
       });
@@ -611,7 +611,7 @@
         body.userToken = personal.token; if (personal.teamId) body.teamId = personal.teamId;
       }
 
-      const r = await fetch("/api/broadcast", {
+      const r = await api("/api/broadcast", {
         method:"POST", headers:{ "Content-Type":"application/json" },
         body: JSON.stringify(body)
       });
@@ -619,6 +619,7 @@
       out.textContent = JSON.stringify(resp, null, 2);
       if (resp.ok) {
         undoBtn.disabled = false;
+        lastBroadcastId = resp.broadcast_id || null;
         lastIdEl.textContent = resp.broadcast_id ? `ID: ${resp.broadcast_id}` : "";
         closeModalFn();
       }
@@ -632,10 +633,14 @@
   // 取り消し
   undoBtn.onclick = async () => {
     undoBtn.disabled = true; out.textContent = "取り消し中...";
-    const r = await fetch("/api/broadcast/undo-last", { method:"POST" });
+    const r = await api("/api/broadcast/undo-last", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json", ...(personal.token ? { "x-user-token": personal.token } : {}) },
+      body: JSON.stringify({ broadcastId: lastBroadcastId })
+    });
     const j = await robustJsonResponse(r);
     out.textContent = JSON.stringify(j, null, 2);
-    if (j.ok) lastIdEl.textContent = "";
+    if (j.ok) { lastIdEl.textContent = ""; lastBroadcastId = null; }
   };
 
   // init
@@ -654,7 +659,7 @@
       }
     });
 
-    userTokenInput.value = localStorage.getItem("xoxp") || "";
+    try { localStorage.removeItem("xoxp"); } catch {}
     teamIdInput.value = localStorage.getItem("teamId") || "";
   })();
 </script>

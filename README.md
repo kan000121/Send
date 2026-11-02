@@ -34,6 +34,15 @@ npm start
 | `SLACK_BOT_TOKEN` | Slack Bot Token（`xoxb-...`） |
 | `TEAM_ID` | (任意) 既定の Slack ワークスペースID |
 | `PORT` | サーバ待受ポート（デフォルト 3000） |
+| `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | Basic 認証の資格情報。未設定時は `127.0.0.1` のみで待受 |
+| `HOST` | (任意) 待受アドレスを明示指定 |
+
+## セキュリティ
+
+- 全ページ・API は Basic 認証で保護（外部公開時は必ず HTTPS の背後で運用すること）
+- API は `X-Requested-With: send` ヘッダ必須＋ Origin 検証で CSRF を防止
+- User Token はサーバに保存せず、`x-user-token` ヘッダ（またはPOSTボディ）でのみ受け取る
+- 取り消しは `broadcastId` 指定、User Token 送信分は同一ユーザーのトークンでのみ実行可能
 
 ## API エンドポイント
 
@@ -44,7 +53,7 @@ npm start
 | GET | `/api/channel-members` | 指定CHのメンバー一覧（名前解決付き） |
 | POST | `/api/personal/verify` | User Token の検証 |
 | POST | `/api/broadcast` | 一斉送信を実行 |
-| POST | `/api/broadcast/undo-last` | 直前のブロードキャストを取り消し |
+| POST | `/api/broadcast/undo-last` | 指定 `broadcastId` のブロードキャストを取り消し |
 
 ## 必要な Slack スコープ
 
