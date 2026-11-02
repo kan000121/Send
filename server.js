@@ -175,7 +175,7 @@ const displayName = (u) =>
 // ------------- API: チャンネル一覧（bot視点） -------------
 app.get("/api/channels", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, [], 200);
+    if (!bot) return safeJson(res, { ok:false, error:"no_token" }, 503);
     const out = [];
     let cursor;
     do {
@@ -193,7 +193,7 @@ app.get("/api/channels", async (req, res, next) => {
 // ------------- API: ユーザー一覧（DM用） -------------
 app.get("/api/users", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, [], 200);
+    if (!bot) return safeJson(res, { ok:false, error:"no_token" }, 503);
     const users = (await getBotDirectory())
       .filter(u => !u.deleted && !u.is_bot)
       .map(u => ({ id:u.id, name: u.profile?.real_name || u.name || u.id }));

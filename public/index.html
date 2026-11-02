@@ -370,6 +370,7 @@
   let allUsers = [];
   let allUsersMap = new Map();
   let channelsLoading = true, usersLoading = true;
+  let channelsError = "", usersError = "";
   let personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
   const selectedChannels = new Set();
   const selectedUsers = new Set();
@@ -446,6 +447,17 @@
   }
   const emptyState = (text, loading = false) =>
     el("div", { class:"empty" }, loading ? el("span", { class:"spinner", "aria-hidden":"true" }) : null, text);
+  // 一覧の取得失敗を、原因（Slack のエラーコード）付きで一覧内に表示する
+  const LOAD_ERROR_HINT = {
+    no_token: "サーバーの .env に SLACK_BOT_TOKEN を設定して再起動してください。",
+    missing_scope: "Bot トークンに users:read / channels:read などのスコープを追加し、アプリを再インストールしてください。",
+    invalid_auth: "SLACK_BOT_TOKEN が正しいか確認してください。",
+    token_revoked: "Slack アプリを再インストールして、新しい Bot トークンを設定してください。",
+  };
+  const loadErrorState = (what, code) => el("div", { class:"empty" },
+    el("div", { text:`${what}を取得できませんでした：${errText(code)}` }),
+    LOAD_ERROR_HINT[code] ? el("div", { class:"muted", text:LOAD_ERROR_HINT[code] }) : null,
+    el("div", { class:"muted", text:`エラーコード：${code}` }));
 
   // ---------- persist ----------
   function saveSelectedChannels() {
@@ -510,6 +522,10 @@
     }
     if (mode === "bot" && channelsLoading) {
       listEl.replaceChildren(emptyState("読み込み中…", true));
+      return updateCounts();
+    }
+    if (mode === "bot" && channelsError) {
+      listEl.replaceChildren(loadErrorState("チャンネル一覧", channelsError));
       return updateCounts();
     }
     const src = currentChannelSource();
@@ -691,7 +707,8 @@
       allUsers = list;
       allUsersMap = new Map(allUsers.map(u => [u.id, u.name]));
     } catch (e) {
-      toast(`ユーザー一覧を取得できませんでした：${errText(e.message)}`, "err");
+      usersError = e.message || "network_error";
+      toast(`ユーザー一覧を取得できませんでした：${errText(usersError)}`, "err");
     } finally {
       usersLoading = false;
       renderUsers();
@@ -699,7 +716,8 @@
   }
   function renderUsers() {
     if (usersLoading) { usersEl.replaceChildren(emptyState("読み込み中…", true)); return updateCounts(); }
-    if (!allUsers.length) { usersEl.replaceChildren(emptyState("ユーザーを取得できませんでした（Bot に users:read 権限が必要です）")); return updateCounts(); }
+    if (usersError) { usersEl.replaceChildren(loadErrorState("ユーザー一覧", usersError)); return updateCounts(); }
+    if (!allUsers.length) { usersEl.replaceChildren(emptyState("表示できるユーザーがいません")); return updateCounts(); }
     const q = userFilter.value.trim().toLowerCase();
     const items = allUsers.filter(u =>
       (!q || (u.name || "").toLowerCase().includes(q)) &&
@@ -733,7 +751,8 @@
       if (!Array.isArray(list)) throw new Error(list.error);
       allChannels = list;
     } catch (e) {
-      toast(`チャンネル一覧を取得できませんでした：${errText(e.message)}`, "err");
+      channelsError = e.message || "network_error";
+      toast(`チャンネル一覧を取得できませんでした：${errText(channelsError)}`, "err");
     } finally {
       channelsLoading = false;
       renderChannels();
