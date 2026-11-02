@@ -1,6 +1,10 @@
 // server.js  (package.json に "type": "module" がある前提)
+import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import express from "express";
+import basicAuth from "express-basic-auth";
+import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { WebClient } from "@slack/web-api";
 
@@ -10,27 +14,229 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN; // xoxb-***
 const TEAM_ID_ENV = process.env.TEAM_ID || "";       // 任意
+const AUDIT_LOG_FILE = process.env.AUDIT_LOG_FILE || "";
+// 例: TRUST_PROXY=1（リバースプロキシ1段の背後で運用する場合）
+const TRUST_PROXY = process.env.TRUST_PROXY || "";
+// HTTPS を強制（TLS 終端プロキシの背後で使う。TRUST_PROXY と併用）
+const FORCE_HTTPS = process.env.FORCE_HTTPS === "1";
+
+// 利用者ごとの Basic 認証アカウント（監査ログで送信者を識別するため）
+// BASIC_AUTH_USERS="alice:pass1,bob:pass2"。旧形式の BASIC_AUTH_USER / BASIC_AUTH_PASS も可
+function loadAuthUsers() {
+  const users = {};
+  for (const pair of (process.env.BASIC_AUTH_USERS || "").split(",")) {
+    const i = pair.indexOf(":");
+    if (i > 0 && i < pair.length - 1) users[pair.slice(0, i).trim()] = pair.slice(i + 1);
+  }
+  if (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS) {
+    users[process.env.BASIC_AUTH_USER] = process.env.BASIC_AUTH_PASS;
+  }
+  return users;
+}
+const AUTH_USERS = loadAuthUsers();
+const HAS_AUTH = Object.keys(AUTH_USERS).length > 0;
+// 認証なしで外部公開しないよう、資格情報が無い場合は localhost のみで待受
+const HOST = process.env.HOST || (HAS_AUTH ? "0.0.0.0" : "127.0.0.1");
+if (!HAS_AUTH && !["127.0.0.1", "localhost", "::1"].includes(HOST)) {
+  console.error(`[ERROR] BASIC_AUTH_USERS 未設定のまま ${HOST} で待ち受けることはできません`);
+  process.exit(1);
+}
+
+const MAX_RECIPIENTS = 200;
+const MAX_TEXT_LEN = 40000; // Slack の text 上限
+const SLACK_ID_RE = /^[A-Z][A-Z0-9]{2,30}$/;
 
 const bot = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
 
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.disable("x-powered-by");
+if (TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
 
-let lastBroadcast = null; // { id, mode, token, results:[{channel,ts}] }
+// ------------- HTTPS 強制 -------------
+if (FORCE_HTTPS) {
+  app.use((req, res, next) => {
+    if (req.secure) {
+      res.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+      return next();
+    }
+    if (req.method === "GET" || req.method === "HEAD") {
+      return res.redirect(308, `https://${req.get("host")}${req.originalUrl}`);
+    }
+    res.status(403).json({ ok:false, error:"https_required" });
+  });
+}
+
+// ------------- セキュリティヘッダ -------------
+app.use((req, res, next) => {
+  res.set({
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  });
+  if (req.path.startsWith("/api/")) res.set("Cache-Control", "no-store");
+  next();
+});
+
+// ------------- 認証（Basic） -------------
+// 認証失敗の総当たり対策：401 のみカウント（API の入力エラー等は数えない）
+const authFailureLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 20,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (req, res) => res.statusCode !== 401,
+  standardHeaders: "draft-7", legacyHeaders: false,
+  message: { ok:false, error:"too_many_auth_failures" },
+});
+if (HAS_AUTH) {
+  app.use(authFailureLimiter);
+  app.use(basicAuth({ users: AUTH_USERS, challenge: true, realm: "Send" }));
+} else {
+  console.warn("[WARN] BASIC_AUTH_USERS 未設定のため 127.0.0.1 のみで待受します");
+}
+
+// ------------- CSRF 対策 -------------
+// カスタムヘッダ必須（クロスオリジンからはプリフライトで拒否される）＋ Origin 検証
+app.use("/api", (req, res, next) => {
+  if (req.get("x-requested-with") !== "send") {
+    return res.status(403).json({ ok:false, error:"csrf_check_failed" });
+  }
+  // プロキシ背後では protocol が変わるため host のみで比較
+  const origin = req.get("origin");
+  let originHost = null;
+  try { originHost = origin ? new URL(origin).host : null; } catch {}
+  if (origin && originHost !== req.get("host")) {
+    return res.status(403).json({ ok:false, error:"origin_not_allowed" });
+  }
+  next();
+});
+
+// ------------- レート制限 -------------
+// 認証済みならアカウント単位、未認証（localhost 運用）なら IP 単位
+const limiterKey = (req) => req.auth?.user ? `user:${req.auth.user}` : `ip:${req.ip}`;
+const makeLimiter = (windowMs, limit) => rateLimit({
+  windowMs, limit, keyGenerator: limiterKey,
+  standardHeaders: "draft-7", legacyHeaders: false,
+  message: { ok:false, error:"rate_limited" },
+});
+app.use("/api", makeLimiter(60 * 1000, 120));
+const sendLimiter = makeLimiter(60 * 1000, 5);
+const verifyLimiter = makeLimiter(60 * 1000, 10);
+
+app.use(express.json({ limit: "200kb" }));
+
+// ------------- 監査ログ -------------
+// トークンや本文全体は残さず、誰が・どこへ・何を送ったかの要点のみ記録
+function audit(req, event, detail) {
+  const line = JSON.stringify({
+    at: new Date().toISOString(), event,
+    actor: req.auth?.user || "(anonymous)", ip: req.ip,
+    ...detail,
+  });
+  console.log(`[AUDIT] ${line}`);
+  if (AUDIT_LOG_FILE) {
+    fs.appendFile(AUDIT_LOG_FILE, line + "\n", { mode: 0o600 }, (e) => { if (e) console.error("audit log write failed:", e.message); });
+  }
+}
+const messageDigest = (text) => crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+// 直近の送信履歴（トークンは保持しない）
+// id -> { actor, mode, userId?, results:[{channel, ts, ownTs:[...]}] }
+// ownTs: 自分が投稿したメッセージ（親＋スレッドの案件概要）。取り消しはこれを直接削除する
+const broadcasts = new Map();
+const MAX_BROADCAST_HISTORY = 20;
+
+// ------------- ログ -------------
+// Slack SDK のエラーには Authorization ヘッダ（トークン）を含むリクエスト全文が入るため、
+// エラーオブジェクトをそのまま出力せず、コードとトークンを伏せたメッセージのみ記録する
+const redact = (text) => String(text ?? "").replace(/xox[a-z]-[A-Za-z0-9-]+/gi, "xox*-***");
+const errCode = (e) => e?.data?.error || e?.code || "";
+const errMessage = (e) => e?.data?.error || redact(e?.message);
+function logError(label, e) {
+  console.error(label, errCode(e), redact(e?.message));
+}
 
 // util
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const pickTeamIdFallback = (teamIdFromClient) => teamIdFromClient || TEAM_ID_ENV || undefined;
+const pickTeamIdFallback = (teamIdFromClient) =>
+  (isSlackId(teamIdFromClient) ? teamIdFromClient : "") || TEAM_ID_ENV || undefined;
 const safeJson = (res, payload, status = 200) => res.status(status).json(payload);
+const isSlackId = (v) => typeof v === "string" && SLACK_ID_RE.test(v);
+const isIdList = (v) => Array.isArray(v) && v.length <= MAX_RECIPIENTS && v.every(isSlackId);
+// トークンローテーション有効時は "xoxe.xoxp-..." / "xoxe.xoxb-..." 形式になる
+const isToken = (v) => typeof v === "string" && /^(xoxe\.)?xox[a-z]-[A-Za-z0-9-]+$/i.test(v);
+const isBotToken = (v) => isToken(v) && /^(xoxe\.)?xoxb-/.test(v);
+const isPlan = (p) => p?.mode === "channel"
+  || (p?.mode === "user" && Array.isArray(p.users) && p.users.length <= MAX_RECIPIENTS && p.users.every(u => isSlackId(u?.id)));
+// ユーザートークンはヘッダのみで受け取る（URL に載せるとログや履歴に残るため）
+const userTokenFromHeader = (req) => {
+  const t = req.get("x-user-token") || "";
+  if (t && !isToken(t)) throw tokenError("invalid_auth");
+  return t;
+};
+// Bot トークン：画面から入力されたもの（x-bot-token）を優先し、無ければ .env の SLACK_BOT_TOKEN
+const botTokenFromHeader = (req) => req.get("x-bot-token") || "";
+const tokenError = (code, status = 400) => Object.assign(new Error(code), { data: { error: code }, status });
+function botFor(req) {
+  const token = botTokenFromHeader(req);
+  if (token) {
+    if (!isBotToken(token)) throw tokenError("not_bot_token");
+    return { client: new WebClient(token), token };
+  }
+  if (bot) return { client: bot, token: SLACK_BOT_TOKEN };
+  return null;
+}
+
+// ワークスペースのユーザー名簿（users.list）をトークン単位で短時間キャッシュ
+// キーはトークンそのものではなくハッシュ
+const DIRECTORY_TTL_MS = 5 * 60 * 1000;
+const directoryCache = new Map(); // sha256(token) -> { at, users }
+const directoryLoading = new Map(); // sha256(token) -> Promise
+async function fetchDirectory(client) {
+  const users = [];
+  let cursor;
+  do {
+    const r = await client.users.list({ limit: 1000, cursor });
+    (r.members || []).forEach(u => users.push(u));
+    cursor = r.response_metadata?.next_cursor;
+  } while (cursor);
+  return users;
+}
+async function getTokenDirectory(token) {
+  const key = crypto.createHash("sha256").update(token).digest("hex");
+  const hit = directoryCache.get(key);
+  if (hit && Date.now() - hit.at < DIRECTORY_TTL_MS) return hit.users;
+  if (!directoryLoading.has(key)) {
+    directoryLoading.set(key, fetchDirectory(new WebClient(token))
+      .then(users => {
+        directoryCache.set(key, { at: Date.now(), users });
+        while (directoryCache.size > 20) directoryCache.delete(directoryCache.keys().next().value);
+        return users;
+      })
+      .finally(() => directoryLoading.delete(key)));
+  }
+  return directoryLoading.get(key);
+}
+// 個人トークン → Bot の順に試す（個人トークンに users:read が無くても Bot で補う）
+async function getDirectory(userToken, botToken) {
+  const tokens = [userToken, botToken].filter(Boolean);
+  if (!tokens.length) throw tokenError("no_token", 503);
+  let firstError;
+  for (const token of tokens) {
+    try { return await getTokenDirectory(token); } catch (e) { firstError ??= e; }
+  }
+  throw firstError;
+}
+const displayName = (u) =>
+  u.profile?.real_name?.trim() || u.profile?.display_name?.trim() || u.name || u.id;
 
 // ------------- API: チャンネル一覧（bot視点） -------------
 app.get("/api/channels", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, [], 200);
+    const b = botFor(req);
+    if (!b) return safeJson(res, { ok:false, error:"no_token" }, 503);
     const out = [];
     let cursor;
     do {
-      const r = await bot.conversations.list({
+      const r = await b.client.conversations.list({
         limit: 1000, cursor,
         types: "public_channel,private_channel"
       });
@@ -44,16 +250,10 @@ app.get("/api/channels", async (req, res, next) => {
 // ------------- API: ユーザー一覧（DM用） -------------
 app.get("/api/users", async (req, res, next) => {
   try {
-    if (!bot) return safeJson(res, [], 200);
-    const users = [];
-    let cursor;
-    do {
-      const r = await bot.users.list({ limit:1000, cursor });
-      (r.members || [])
-        .filter(u => !u.deleted && !u.is_bot)
-        .forEach(u => users.push({ id:u.id, name: u.profile?.real_name || u.name || u.id }));
-      cursor = r.response_metadata?.next_cursor;
-    } while (cursor);
+    const mode = (req.query.mode || "bot").toLowerCase();
+    const users = (await getDirectory(mode === "user" ? userTokenFromHeader(req) : "", botFor(req)?.token))
+      .filter(u => !u.deleted && !u.is_bot)
+      .map(u => ({ id:u.id, name: u.profile?.real_name || u.name || u.id }));
     safeJson(res, users);
   } catch (e) { next(e); }
 });
@@ -64,10 +264,11 @@ app.get("/api/channel-members", async (req, res, next) => {
     const { channel } = req.query;
     const mode = (req.query.mode || "bot").toLowerCase();
     const teamId = pickTeamIdFallback(req.query.teamId);
-    const userToken = req.query.userToken || req.header("x-user-token");
+    const userToken = userTokenFromHeader(req);
 
-    const client = (mode === "user" && userToken) ? new WebClient(userToken) : bot;
-    if (!channel || !client) return safeJson(res, [], 200);
+    const b = mode === "user" ? null : botFor(req);
+    const client = mode === "user" ? (userToken ? new WebClient(userToken) : null) : b?.client;
+    if (!isSlackId(channel) || !client) return safeJson(res, [], 200);
 
     const ids = [];
     let cursor;
@@ -79,29 +280,36 @@ app.get("/api/channel-members", async (req, res, next) => {
       cursor = r.response_metadata?.next_cursor;
     } while (cursor);
 
-    // 名前解決（users.info）
-    const out = [];
-    for (const uid of ids) {
-      try {
-        const info = await client.users.info({ user: uid });
-        const prof = info?.user?.profile || {};
-        const name = prof.real_name?.trim() || prof.display_name?.trim() || info?.user?.name || uid;
-        out.push({ id: uid, name });
-      } catch {
-        out.push({ id: uid, name: uid });
-      }
-      await sleep(30);
-    }
-    safeJson(res, out);
+    // 名前解決：メンバーごとの users.info ではなく名簿を一括取得して引く
+    // 名簿が取れなくてもメンバー一覧は返す（名前の代わりに ID を表示）
+    const directory = await getDirectory(mode === "user" ? userToken : "", b?.token).catch(() => []);
+    const names = new Map(directory.map(u => [u.id, displayName(u)]));
+    safeJson(res, ids.map(uid => ({ id: uid, name: names.get(uid) || uid })));
+  } catch (e) { next(e); }
+});
+
+// ------------- API: Bot トークン検証 -------------
+app.post("/api/bot/verify", verifyLimiter, async (req, res, next) => {
+  try {
+    const b = botFor(req);
+    if (!b) return safeJson(res, { ok:false, error:"no_token" }, 400);
+    const auth = await b.client.auth.test();
+    if (!auth.bot_id) return safeJson(res, { ok:false, error:"not_bot_token" }, 400);
+    safeJson(res, {
+      ok: true,
+      bot: { id: auth.user_id, name: auth.user },
+      fromServer: !botTokenFromHeader(req),
+    });
   } catch (e) { next(e); }
 });
 
 // ------------- API: 個人トークン検証 -------------
-app.post("/api/personal/verify", async (req, res, next) => {
+app.post("/api/personal/verify", verifyLimiter, async (req, res, next) => {
   try {
     const userToken = req.body?.userToken;
     const teamId = pickTeamIdFallback(req.body?.teamId);
     if (!userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
+    if (!isToken(userToken)) return safeJson(res, { ok:false, error:"invalid_auth" }, 400);
 
     const userClient = new WebClient(userToken);
     const auth = await userClient.auth.test();
@@ -147,8 +355,18 @@ function buildTextWithPlan(text, plan) {
   return text;
 }
 
+// 案件概要をスレッドに返信。失敗しても親メッセージの送信結果は成功のまま扱う
+async function postSummaryReply(client, record, summary) {
+  try {
+    const reply = await client.chat.postMessage({ channel: record.channel, thread_ts: record.ts, text: "```\n"+summary+"\n```" });
+    if (reply.ok) record.ownTs.push(reply.ts);
+  } catch (e) {
+    logError(`案件概要の返信に失敗: ${record.channel}`, e);
+  }
+}
+
 // ------------- API: 送信 -------------
-app.post("/api/broadcast", async (req, res, next) => {
+app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
   try {
     const {
       message, summary,
@@ -159,22 +377,38 @@ app.post("/api/broadcast", async (req, res, next) => {
       userToken, teamId
     } = req.body || {};
 
-    if (!message || (!channelIds.length && !userIds.length)) {
+    if (typeof message !== "string" || !message || message.length > MAX_TEXT_LEN
+        || (summary != null && (typeof summary !== "string" || summary.length > MAX_TEXT_LEN))
+        || !isIdList(channelIds) || !isIdList(userIds)
+        || (!channelIds.length && !userIds.length)
+        || channelIds.length + userIds.length > MAX_RECIPIENTS
+        || typeof perChannelMentions !== "object" || perChannelMentions === null) {
+      return safeJson(res, { ok:false, error:"invalid_params" }, 400);
+    }
+    // メンション設定の検証（"<@...>" への注入防止）
+    if (!Object.values(perChannelMentions).every(isPlan)) {
       return safeJson(res, { ok:false, error:"invalid_params" }, 400);
     }
 
-    const client = (mode === "user" && userToken) ? new WebClient(userToken) : bot;
+    if (mode === "user" && !userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
+    if (mode === "user" && !isToken(userToken)) return safeJson(res, { ok:false, error:"invalid_auth" }, 400);
+    const isBot = mode !== "user";
+    const client = isBot ? botFor(req)?.client : new WebClient(userToken);
     if (!client) return safeJson(res, { ok:false, error:"no_token" }, 400);
+
+    // 送信者（個人 or Bot）を記録し、取り消し時に同一の送信者か照合する
+    const senderUserId = (await client.auth.test()).user_id;
 
     const effectiveTeam = pickTeamIdFallback(teamId);
     const results = [];
+    const sent = []; // 取り消し用 [{ channel, ts, ownTs }]
 
     // CH メッセージ
     for (const ch of channelIds) {
-      const plan = perChannelMentions[ch] || { mode:"channel" };
+      const plan = Object.hasOwn(perChannelMentions, ch) ? perChannelMentions[ch] : { mode:"channel" };
       const text = buildTextWithPlan(message, plan);
 
-      if (autoJoinPublic && client === bot) {
+      if (autoJoinPublic && isBot && ch.startsWith("C")) {
         try { await client.conversations.join({ channel: ch }); } catch {}
       }
 
@@ -182,15 +416,13 @@ app.post("/api/broadcast", async (req, res, next) => {
         const r = await client.chat.postMessage({
           channel: ch, text, ...(effectiveTeam ? { team: effectiveTeam } : {})
         });
-        results.push({ ok: r.ok, channel: ch, ts: r.ts });
+        results.push({ ok: r.ok, channel: r.channel, ts: r.ts });
+        const record = { channel: r.channel, ts: r.ts, ownTs: [r.ts] };
+        sent.push(record);
 
-        if (summary && r.ok) {
-          await client.chat.postMessage({
-            channel: r.channel, thread_ts: r.ts, text: "```\n"+summary+"\n```"
-          });
-        }
+        if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
-        results.push({ ok:false, channel: ch, error: e?.data?.error || e.message });
+        results.push({ ok:false, channel: ch, error: errMessage(e) });
       }
       await sleep(200);
     }
@@ -200,78 +432,109 @@ app.post("/api/broadcast", async (req, res, next) => {
       try {
         const im = await client.conversations.open({ users: uid, ...(effectiveTeam ? { team_id: effectiveTeam } : {}) });
         const r = await client.chat.postMessage({ channel: im.channel.id, text: message });
-        results.push({ ok: r.ok, channel: im.channel.id, ts: r.ts, dm_to: uid });
-        if (summary && r.ok) {
-          await client.chat.postMessage({ channel: r.channel, thread_ts: r.ts, text: "```\n"+summary+"\n```" });
-        }
+        results.push({ ok: r.ok, channel: r.channel, ts: r.ts, dm_to: uid });
+        const record = { channel: r.channel, ts: r.ts, ownTs: [r.ts] };
+        sent.push(record);
+        if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
-        results.push({ ok:false, dm_to: uid, error: e?.data?.error || e.message });
+        results.push({ ok:false, dm_to: uid, error: errMessage(e) });
       }
       await sleep(200);
     }
 
-    lastBroadcast = {
-      id: `b${Date.now()}`, mode,
-      token: mode === "user" ? userToken : SLACK_BOT_TOKEN,
-      results: results.filter(r => r.ok && r.channel && r.ts).map(r => ({ channel:r.channel, ts:r.ts }))
-    };
+    const broadcastId = `b${crypto.randomUUID()}`;
+    broadcasts.set(broadcastId, {
+      actor: req.auth?.user,
+      mode: isBot ? "bot" : "user",
+      userId: senderUserId,
+      results: sent
+    });
+    while (broadcasts.size > MAX_BROADCAST_HISTORY) broadcasts.delete(broadcasts.keys().next().value);
 
-    safeJson(res, { ok: results.every(r => r.ok), broadcast_id: lastBroadcast.id, results });
+    audit(req, "broadcast", {
+      broadcastId, mode: isBot ? "bot" : "user", slackUserId: senderUserId,
+      channels: channelIds, dms: userIds,
+      messageSha256: messageDigest(message), messageLength: message.length,
+      okCount: results.filter(r => r.ok).length, failCount: results.filter(r => !r.ok).length,
+    });
+
+    safeJson(res, { ok: results.every(r => r.ok), broadcast_id: broadcastId, results });
   } catch (e) { next(e); }
 });
 
 // ------------- API: 取り消し -------------
-app.post("/api/broadcast/undo-last", async (req, res, next) => {
+app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
   try {
-    if (!lastBroadcast?.results?.length)
+    const broadcastId = req.body?.broadcastId;
+    const target = typeof broadcastId === "string" ? broadcasts.get(broadcastId) : undefined;
+    if (!target?.results?.length)
       return res.status(400).json({ ok: false, error: "no_last_broadcast" });
+    if (target.actor !== req.auth?.user)
+      return res.status(403).json({ ok:false, error:"not_owner" });
 
-    const client = new WebClient(lastBroadcast.token);
+    // 送信時と同じ主体のトークンでのみ取り消し可能
+    let client;
+    if (target.mode === "user") {
+      const userToken = userTokenFromHeader(req);
+      if (!userToken) return res.status(401).json({ ok:false, error:"token_required" });
+      client = new WebClient(userToken);
+    } else {
+      client = botFor(req)?.client;
+      if (!client) return res.status(400).json({ ok:false, error:"no_token" });
+    }
+    const auth = await client.auth.test();
+    if (auth.user_id !== target.userId) return res.status(403).json({ ok:false, error:"not_owner" });
     const results = [];
 
-    for (const it of lastBroadcast.results) {
-      try {
-        let allMessages = [];
-        let cursor;
+    const remaining = [];
 
-        // 🔁 ページネーション付きで replies を全取得
+    for (const it of target.results) {
+      // 自分の投稿は記録済みの ts で直接削除する（スレッドの読み取り権限が無くても消せる）
+      const tsSet = new Set(it.ownTs || [it.ts]);
+      // スレッド内の送信者自身の返信も消す（im:history 等が無ければスキップ）
+      // 他の人の返信は消さない（管理者トークンだと他人のメッセージも削除できてしまうため）
+      try {
+        let cursor;
         do {
-          const r = await client.conversations.replies({
-            channel: it.channel,
-            ts: it.ts,
-            cursor,
-            limit: 200, // 最大値
-          });
-          allMessages = allMessages.concat(r.messages || []);
+          const r = await client.conversations.replies({ channel: it.channel, ts: it.ts, cursor, limit: 200 });
+          (r.messages || []).filter(m => m.user === target.userId).forEach(m => tsSet.add(m.ts));
           cursor = r.response_metadata?.next_cursor;
         } while (cursor);
-
-        // 親含めて全削除（新しい順で確実に消す）
-        for (const msg of [...allMessages].reverse()) {
-          try {
-            await client.chat.delete({
-              channel: it.channel,
-              ts: msg.ts,
-            });
-            await sleep(150);
-          } catch (e) {
-            console.warn("削除失敗:", e.data?.error || e.message);
-          }
-        }
-
-        results.push({ ok: true, channel: it.channel, ts: it.ts });
       } catch (e) {
-        results.push({
-          ok: false,
-          channel: it.channel,
-          ts: it.ts,
-          error: e?.data?.error || e.message,
-        });
+        logError(`スレッド取得をスキップ: ${it.channel}`, e);
+      }
+
+      // 新しい順に削除（親は最後）
+      const own = new Set(it.ownTs || [it.ts]);
+      const ordered = [...tsSet].sort((a, b) => Number(b) - Number(a));
+      let error;
+      for (const ts of ordered) {
+        try {
+          await client.chat.delete({ channel: it.channel, ts });
+        } catch (e) {
+          const code = errMessage(e);
+          // 既に消えているものは成功扱い
+          if (code !== "message_not_found" && own.has(ts)) error ??= code;
+        }
+        await sleep(150);
+      }
+
+      if (error) {
+        results.push({ ok: false, channel: it.channel, ts: it.ts, error });
+        remaining.push(it);
+      } else {
+        results.push({ ok: true, channel: it.channel, ts: it.ts });
       }
       await sleep(300);
     }
 
-    lastBroadcast = null;
+    // 失敗した分は再試行できるよう残す
+    if (remaining.length) target.results = remaining;
+    else broadcasts.delete(broadcastId);
+    audit(req, "undo", {
+      broadcastId, mode: target.mode, slackUserId: target.userId,
+      okCount: results.filter(r => r.ok).length, failCount: results.filter(r => !r.ok).length,
+    });
     res.json({ ok: results.every(r => r.ok), results });
   } catch (e) {
     next(e);
@@ -282,4 +545,12 @@ app.post("/api/broadcast/undo-last", async (req, res, next) => {
 app.use(express.static(path.join(process.cwd(), "public")));
 app.get("*", (req, res) => res.sendFile(path.join(process.cwd(), "public", "index.html")));
 
-app.listen(PORT, () => console.log(`Server running: http://localhost:${PORT}`));
+// ------------- エラーハンドラ（スタックトレースを返さない） -------------
+app.use((err, req, res, next) => {
+  logError(`${req.method} ${req.path}`, err);
+  if (res.headersSent) return next(err);
+  const status = err?.status || (err?.data?.error ? 502 : 500);
+  res.status(status).json({ ok:false, error: err?.data?.error || "internal_error" });
+});
+
+app.listen(PORT, HOST, () => console.log(`Server running: http://${HOST}:${PORT}`));
