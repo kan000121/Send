@@ -39,7 +39,12 @@
 
   .field { display:grid; gap:6px; margin-bottom:14px; }
   .field:last-child { margin-bottom:0; }
-  .field > label { font-weight:600; font-size:14px; }
+  .field > label, .field-head label { font-weight:600; font-size:14px; }
+  .field-error { color:var(--danger); font-size:13px; font-weight:600; margin-left:auto; }
+  .message-grid { display:grid; grid-template-columns:1fr; gap:14px 16px; }
+  .message-grid .field { margin:0; grid-template-rows:auto 1fr; }
+  .message-grid textarea { height:100%; min-height:180px; }
+  @media (min-width:800px) { .message-grid { grid-template-columns:1fr 1fr; } }
   .field-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
   .muted { color:var(--muted); font-weight:400; font-size:13px; }
   .hint { color:var(--muted); font-size:13px; margin:8px 0 0; }
@@ -210,17 +215,21 @@
   <!-- 2. メッセージ -->
   <section class="card" aria-labelledby="h-message">
     <h2 id="h-message"><span class="step">2</span>メッセージ</h2>
+    <div class="message-grid">
     <div class="field">
       <div class="field-head">
         <label for="message">本文 <span class="muted">（必須）</span></label>
+        <span id="messageError" class="field-error" hidden>本文を入力してください</span>
         <span id="messageCount" class="muted">0 / 40,000</span>
       </div>
-      <textarea id="message" rows="6" placeholder="送信するメッセージを入力"></textarea>
-      <p id="messageError" class="note err" hidden>本文を入力してください。</p>
+      <textarea id="message" rows="8" placeholder="送信するメッセージを入力"></textarea>
     </div>
     <div class="field">
-      <label for="summary">案件概要 <span class="muted">（任意・スレッドにコードブロックで返信されます）</span></label>
-      <textarea id="summary" rows="5" placeholder="``` で囲む必要はありません（自動で囲みます）"></textarea>
+      <div class="field-head">
+        <label for="summary">案件概要 <span class="muted">（任意・スレッドにコードブロックで返信されます）</span></label>
+      </div>
+      <textarea id="summary" rows="8" placeholder="``` で囲む必要はありません（自動で囲みます）"></textarea>
+    </div>
     </div>
   </section>
 
