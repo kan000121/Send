@@ -15,7 +15,7 @@
 
 - **Backend**: Node.js 20 / Express
 - **Slack 連携**: `@slack/web-api`
-- **Frontend**: HTML + Vanilla JS（単一の `public/index.html`）
+- **Frontend**: HTML + Vanilla JS（`public/index.html` / `public/app.js`）
 
 ## セットアップ
 
@@ -46,8 +46,11 @@ npm start
 - 認証失敗は IP あたり 15 分 20 回まで。API は 1 分 120 回、送信・取り消しは 1 分 5 回、トークン検証は 1 分 10 回まで（アカウント単位）
 - API は `X-Requested-With: send` ヘッダ必須＋ Origin 検証で CSRF を防止
 - User Token / 画面から入力した Bot Token はサーバに保存せず、`x-user-token` / `x-bot-token` ヘッダ（User Token は POST ボディも可）でのみ受け取る
-- 取り消しは送信時に記録した自分の投稿（親メッセージ＋案件概要の返信）を直接削除する。スレッド内の他の返信は `*:history` 権限があれば削除を試みる。失敗した分は再度取り消し可能
+- 取り消しは送信時に記録した自分の投稿（親メッセージ＋案件概要の返信）を直接削除する。スレッド内の他の人の返信は削除しない。失敗した分は再度取り消し可能
 - 取り消しは `broadcastId` 指定。送信した Basic 認証アカウント本人のみ実行可能で、User Token 送信分は同一 Slack ユーザーのトークンが必要
+- 認証なし（`BASIC_AUTH_USERS` 未設定）で localhost 以外の `HOST` を指定すると起動を拒否
+- サーバーログにはトークンを出力しない（Slack SDK のエラーはコードと伏字化したメッセージのみ記録）
+- CSP でインラインスクリプトを禁止（画面のスクリプトは `public/app.js`）
 - 送信・取り消しは監査ログに記録（実行者・宛先・本文の SHA-256 先頭16桁と文字数。トークンと本文そのものは残さない）
 
 ## API エンドポイント

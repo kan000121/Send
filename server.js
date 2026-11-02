@@ -37,6 +37,10 @@ const AUTH_USERS = loadAuthUsers();
 const HAS_AUTH = Object.keys(AUTH_USERS).length > 0;
 // 認証なしで外部公開しないよう、資格情報が無い場合は localhost のみで待受
 const HOST = process.env.HOST || (HAS_AUTH ? "0.0.0.0" : "127.0.0.1");
+if (!HAS_AUTH && !["127.0.0.1", "localhost", "::1"].includes(HOST)) {
+  console.error(`[ERROR] BASIC_AUTH_USERS 未設定のまま ${HOST} で待ち受けることはできません`);
+  process.exit(1);
+}
 
 const MAX_RECIPIENTS = 200;
 const MAX_TEXT_LEN = 40000; // Slack の text 上限
@@ -67,7 +71,7 @@ app.use((req, res, next) => {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   });
   if (req.path.startsWith("/api/")) res.set("Cache-Control", "no-store");
   next();
@@ -140,21 +144,41 @@ const messageDigest = (text) => crypto.createHash("sha256").update(text).digest(
 const broadcasts = new Map();
 const MAX_BROADCAST_HISTORY = 20;
 
+// ------------- ログ -------------
+// Slack SDK のエラーには Authorization ヘッダ（トークン）を含むリクエスト全文が入るため、
+// エラーオブジェクトをそのまま出力せず、コードとトークンを伏せたメッセージのみ記録する
+const redact = (text) => String(text ?? "").replace(/xox[a-z]-[A-Za-z0-9-]+/gi, "xox*-***");
+const errCode = (e) => e?.data?.error || e?.code || "";
+const errMessage = (e) => e?.data?.error || redact(e?.message);
+function logError(label, e) {
+  console.error(label, errCode(e), redact(e?.message));
+}
+
 // util
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const pickTeamIdFallback = (teamIdFromClient) => teamIdFromClient || TEAM_ID_ENV || undefined;
+const pickTeamIdFallback = (teamIdFromClient) =>
+  (isSlackId(teamIdFromClient) ? teamIdFromClient : "") || TEAM_ID_ENV || undefined;
 const safeJson = (res, payload, status = 200) => res.status(status).json(payload);
 const isSlackId = (v) => typeof v === "string" && SLACK_ID_RE.test(v);
 const isIdList = (v) => Array.isArray(v) && v.length <= MAX_RECIPIENTS && v.every(isSlackId);
+// トークンローテーション有効時は "xoxe.xoxp-..." / "xoxe.xoxb-..." 形式になる
+const isToken = (v) => typeof v === "string" && /^(xoxe\.)?xox[a-z]-[A-Za-z0-9-]+$/i.test(v);
+const isBotToken = (v) => isToken(v) && /^(xoxe\.)?xoxb-/.test(v);
+const isPlan = (p) => p?.mode === "channel"
+  || (p?.mode === "user" && Array.isArray(p.users) && p.users.length <= MAX_RECIPIENTS && p.users.every(u => isSlackId(u?.id)));
 // ユーザートークンはヘッダのみで受け取る（URL に載せるとログや履歴に残るため）
-const userTokenFromHeader = (req) => req.get("x-user-token") || "";
+const userTokenFromHeader = (req) => {
+  const t = req.get("x-user-token") || "";
+  if (t && !isToken(t)) throw tokenError("invalid_auth");
+  return t;
+};
 // Bot トークン：画面から入力されたもの（x-bot-token）を優先し、無ければ .env の SLACK_BOT_TOKEN
 const botTokenFromHeader = (req) => req.get("x-bot-token") || "";
 const tokenError = (code, status = 400) => Object.assign(new Error(code), { data: { error: code }, status });
 function botFor(req) {
   const token = botTokenFromHeader(req);
   if (token) {
-    if (!token.startsWith("xoxb-")) throw tokenError("not_bot_token");
+    if (!isBotToken(token)) throw tokenError("not_bot_token");
     return { client: new WebClient(token), token };
   }
   if (bot) return { client: bot, token: SLACK_BOT_TOKEN };
@@ -285,6 +309,7 @@ app.post("/api/personal/verify", verifyLimiter, async (req, res, next) => {
     const userToken = req.body?.userToken;
     const teamId = pickTeamIdFallback(req.body?.teamId);
     if (!userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
+    if (!isToken(userToken)) return safeJson(res, { ok:false, error:"invalid_auth" }, 400);
 
     const userClient = new WebClient(userToken);
     const auth = await userClient.auth.test();
@@ -336,7 +361,7 @@ async function postSummaryReply(client, record, summary) {
     const reply = await client.chat.postMessage({ channel: record.channel, thread_ts: record.ts, text: "```\n"+summary+"\n```" });
     if (reply.ok) record.ownTs.push(reply.ts);
   } catch (e) {
-    console.warn("案件概要の返信に失敗:", record.channel, e?.data?.error || e.message);
+    logError(`案件概要の返信に失敗: ${record.channel}`, e);
   }
 }
 
@@ -360,14 +385,13 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
         || typeof perChannelMentions !== "object" || perChannelMentions === null) {
       return safeJson(res, { ok:false, error:"invalid_params" }, 400);
     }
-    // メンション対象IDの検証（"<@...>" への注入防止）
-    for (const plan of Object.values(perChannelMentions)) {
-      if (plan?.mode === "user" && !(plan.users || []).every(u => isSlackId(u?.id))) {
-        return safeJson(res, { ok:false, error:"invalid_params" }, 400);
-      }
+    // メンション設定の検証（"<@...>" への注入防止）
+    if (!Object.values(perChannelMentions).every(isPlan)) {
+      return safeJson(res, { ok:false, error:"invalid_params" }, 400);
     }
 
     if (mode === "user" && !userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
+    if (mode === "user" && !isToken(userToken)) return safeJson(res, { ok:false, error:"invalid_auth" }, 400);
     const isBot = mode !== "user";
     const client = isBot ? botFor(req)?.client : new WebClient(userToken);
     if (!client) return safeJson(res, { ok:false, error:"no_token" }, 400);
@@ -398,7 +422,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
 
         if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
-        results.push({ ok:false, channel: ch, error: e?.data?.error || e.message });
+        results.push({ ok:false, channel: ch, error: errMessage(e) });
       }
       await sleep(200);
     }
@@ -413,7 +437,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
         sent.push(record);
         if (summary && r.ok) await postSummaryReply(client, record, summary);
       } catch (e) {
-        results.push({ ok:false, dm_to: uid, error: e?.data?.error || e.message });
+        results.push({ ok:false, dm_to: uid, error: errMessage(e) });
       }
       await sleep(200);
     }
@@ -467,16 +491,17 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
     for (const it of target.results) {
       // 自分の投稿は記録済みの ts で直接削除する（スレッドの読み取り権限が無くても消せる）
       const tsSet = new Set(it.ownTs || [it.ts]);
-      // スレッド内の他の返信も消せる範囲で消す（im:history 等が無ければスキップ）
+      // スレッド内の送信者自身の返信も消す（im:history 等が無ければスキップ）
+      // 他の人の返信は消さない（管理者トークンだと他人のメッセージも削除できてしまうため）
       try {
         let cursor;
         do {
           const r = await client.conversations.replies({ channel: it.channel, ts: it.ts, cursor, limit: 200 });
-          (r.messages || []).forEach(m => tsSet.add(m.ts));
+          (r.messages || []).filter(m => m.user === target.userId).forEach(m => tsSet.add(m.ts));
           cursor = r.response_metadata?.next_cursor;
         } while (cursor);
       } catch (e) {
-        console.warn("スレッド取得をスキップ:", it.channel, e?.data?.error || e.message);
+        logError(`スレッド取得をスキップ: ${it.channel}`, e);
       }
 
       // 新しい順に削除（親は最後）
@@ -487,8 +512,8 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
         try {
           await client.chat.delete({ channel: it.channel, ts });
         } catch (e) {
-          const code = e?.data?.error || e.message;
-          // 既に消えているものは成功扱い。他人の返信が消せないのは失敗にしない
+          const code = errMessage(e);
+          // 既に消えているものは成功扱い
           if (code !== "message_not_found" && own.has(ts)) error ??= code;
         }
         await sleep(150);
@@ -522,7 +547,7 @@ app.get("*", (req, res) => res.sendFile(path.join(process.cwd(), "public", "inde
 
 // ------------- エラーハンドラ（スタックトレースを返さない） -------------
 app.use((err, req, res, next) => {
-  console.error(err);
+  logError(`${req.method} ${req.path}`, err);
   if (res.headersSent) return next(err);
   const status = err?.status || (err?.data?.error ? 502 : 500);
   res.status(status).json({ ok:false, error: err?.data?.error || "internal_error" });
