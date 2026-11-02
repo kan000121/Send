@@ -34,15 +34,20 @@ npm start
 | `SLACK_BOT_TOKEN` | Slack Bot Token（`xoxb-...`） |
 | `TEAM_ID` | (任意) 既定の Slack ワークスペースID |
 | `PORT` | サーバ待受ポート（デフォルト 3000） |
-| `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | Basic 認証の資格情報。未設定時は `127.0.0.1` のみで待受 |
+| `BASIC_AUTH_USERS` | 利用者ごとの Basic 認証（`alice:pass1,bob:pass2`）。未設定時は `127.0.0.1` のみで待受。旧形式の `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` も可 |
 | `HOST` | (任意) 待受アドレスを明示指定 |
+| `TRUST_PROXY` | (任意) リバースプロキシの背後で運用する場合に設定（例: `1`） |
+| `FORCE_HTTPS` | (任意) `1` で HTTP→HTTPS リダイレクトと HSTS を有効化（`TRUST_PROXY` と併用） |
+| `AUDIT_LOG_FILE` | (任意) 監査ログ（JSON Lines）の追記先。未設定時は標準出力のみ |
 
 ## セキュリティ
 
-- 全ページ・API は Basic 認証で保護（外部公開時は必ず HTTPS の背後で運用すること）
+- 全ページ・API は Basic 認証で保護。外部公開時は TLS 終端プロキシの背後に置き、`TRUST_PROXY=1` `FORCE_HTTPS=1` を設定すること
+- 認証失敗は IP あたり 15 分 20 回まで。API は 1 分 120 回、送信・取り消しは 1 分 5 回、トークン検証は 1 分 10 回まで（アカウント単位）
 - API は `X-Requested-With: send` ヘッダ必須＋ Origin 検証で CSRF を防止
 - User Token はサーバに保存せず、`x-user-token` ヘッダ（またはPOSTボディ）でのみ受け取る
-- 取り消しは `broadcastId` 指定、User Token 送信分は同一ユーザーのトークンでのみ実行可能
+- 取り消しは `broadcastId` 指定。送信した Basic 認証アカウント本人のみ実行可能で、User Token 送信分は同一 Slack ユーザーのトークンが必要
+- 送信・取り消しは監査ログに記録（実行者・宛先・本文の SHA-256 先頭16桁と文字数。トークンと本文そのものは残さない）
 
 ## API エンドポイント
 

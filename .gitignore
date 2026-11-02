@@ -12,3 +12,6 @@ node_modules
 npm-debug.log*
 .yarn/*
 .DS_Store
+
+# 監査ログ
+audit.log
