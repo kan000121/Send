@@ -8,6 +8,7 @@ import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { WebClient } from "@slack/web-api";
 import { isHashed, parseHash, verifyHash } from "./lib/password.js";
+import { SESSION_COOKIE, STATE_COOKIE, sessionKey, seal, unseal, parseCookies, cookieHeader, safeEqual } from "./lib/session.js";
 
 dotenv.config();
 
@@ -20,6 +21,26 @@ const AUDIT_LOG_FILE = process.env.AUDIT_LOG_FILE || "";
 const TRUST_PROXY = process.env.TRUST_PROXY || "";
 // HTTPS を強制（TLS 終端プロキシの背後で使う。TRUST_PROXY と併用）
 const FORCE_HTTPS = process.env.FORCE_HTTPS === "1";
+
+// Slack でログイン（OAuth）。CLIENT_ID と CLIENT_SECRET を設定すると有効になる
+const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID || "";
+const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET || "";
+const OAUTH_ENABLED = !!(SLACK_CLIENT_ID && SLACK_CLIENT_SECRET);
+if (!!SLACK_CLIENT_ID !== !!SLACK_CLIENT_SECRET) {
+  console.error("[ERROR] Slack ログインには SLACK_CLIENT_ID と SLACK_CLIENT_SECRET の両方が必要です");
+  process.exit(1);
+}
+// ログインを許可するワークスペース（team_id または Enterprise Grid の enterprise_id。カンマ区切り）
+const ALLOWED_TEAM_IDS = (process.env.ALLOWED_TEAM_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
+// リダイレクト先の URL。Render では RENDER_EXTERNAL_URL が自動で設定される
+const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
+const USER_SCOPES = ["chat:write", "channels:read", "groups:read", "users:read", "im:write"];
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Cookie の暗号鍵。SESSION_SECRET が無ければ Client Secret から導出する
+const SESSION_KEY = OAUTH_ENABLED ? sessionKey(process.env.SESSION_SECRET || SLACK_CLIENT_SECRET) : null;
+if (OAUTH_ENABLED && !ALLOWED_TEAM_IDS.length) {
+  console.warn("[WARN] ALLOWED_TEAM_IDS 未設定のため、どのワークスペースの Slack アカウントでもログインできます");
+}
 
 // 利用者ごとの Basic 認証アカウント（監査ログで送信者を識別するため）
 // BASIC_AUTH_USERS="alice:pass1,bob:pass2"。旧形式の BASIC_AUTH_USER / BASIC_AUTH_PASS も可
@@ -36,7 +57,7 @@ function loadAuthUsers() {
   return users;
 }
 const AUTH_USERS = loadAuthUsers();
-const HAS_AUTH = Object.keys(AUTH_USERS).length > 0;
+const HAS_AUTH = Object.keys(AUTH_USERS).length > 0 || OAUTH_ENABLED;
 for (const [user, stored] of Object.entries(AUTH_USERS)) {
   if (!isHashed(stored)) continue;
   const parsed = parseHash(stored);
@@ -52,13 +73,13 @@ if (plainUsers.length) {
 }
 // Render 等の PaaS では localhost 待受だと外部から届かず原因不明のデプロイ失敗になるため、明示的に止める
 if (!HAS_AUTH && process.env.RENDER) {
-  console.error("[ERROR] Render 上で起動するには BASIC_AUTH_USERS の設定が必要です（Environment で設定してください）");
+  console.error("[ERROR] Render 上で起動するには Slack ログイン（SLACK_CLIENT_ID / SLACK_CLIENT_SECRET）か BASIC_AUTH_USERS の設定が必要です（Environment で設定してください）");
   process.exit(1);
 }
 // 認証なしで外部公開しないよう、資格情報が無い場合は localhost のみで待受
 const HOST = process.env.HOST || (HAS_AUTH ? "0.0.0.0" : "127.0.0.1");
 if (!HAS_AUTH && !["127.0.0.1", "localhost", "::1"].includes(HOST)) {
-  console.error(`[ERROR] BASIC_AUTH_USERS 未設定のまま ${HOST} で待ち受けることはできません`);
+  console.error(`[ERROR] ログイン設定（SLACK_CLIENT_ID / SLACK_CLIENT_SECRET か BASIC_AUTH_USERS）が無いまま ${HOST} で待ち受けることはできません`);
   process.exit(1);
 }
 
@@ -70,6 +91,12 @@ const bot = SLACK_BOT_TOKEN ? new WebClient(SLACK_BOT_TOKEN) : null;
 
 app.disable("x-powered-by");
 if (TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
+
+// ------------- ヘルスチェック -------------
+// Render などのヘルスチェックは認証情報なし・HTTP で来るため、HTTPS 強制と認証より前に置く
+app.get("/healthz", (req, res) => {
+  res.set("Cache-Control", "no-store").type("text/plain").send("ok");
+});
 
 // ------------- HTTPS 強制 -------------
 if (FORCE_HTTPS) {
@@ -125,12 +152,25 @@ function checkPassword(user, password) {
   }
   return ok;
 }
-if (HAS_AUTH) {
+if (Object.keys(AUTH_USERS).length) {
   app.use(authFailureLimiter);
   app.use(basicAuth({ authorizer: checkPassword, challenge: true, realm: "Send" }));
-} else {
-  console.warn("[WARN] BASIC_AUTH_USERS 未設定のため 127.0.0.1 のみで待受します");
+} else if (!HAS_AUTH) {
+  console.warn("[WARN] ログイン設定が無いため 127.0.0.1 のみで待受します");
 }
+
+// ------------- Slack ログインのセッション -------------
+if (OAUTH_ENABLED) {
+  app.use((req, res, next) => {
+    const raw = parseCookies(req.get("cookie"))[SESSION_COOKIE];
+    const session = raw ? unseal(SESSION_KEY, raw) : null;
+    if (session) req.slackSession = session;
+    next();
+  });
+}
+const cookieOpts = (req, maxAge, path) => ({ maxAge, path, secure: req.secure || FORCE_HTTPS });
+// 操作した人の識別子（監査ログ・レート制限・取り消しの本人確認に使う）
+const actorOf = (req) => req.auth?.user || (req.slackSession ? `slack:${req.slackSession.uid}` : undefined);
 
 // ------------- CSRF 対策 -------------
 // カスタムヘッダ必須（クロスオリジンからはプリフライトで拒否される）＋ Origin 検証
@@ -148,9 +188,15 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+// Slack ログインが有効なら、ログイン状態の確認以外の API はログイン必須
+app.use("/api", (req, res, next) => {
+  if (!OAUTH_ENABLED || req.slackSession || req.path.startsWith("/session")) return next();
+  res.status(401).json({ ok:false, error:"login_required" });
+});
+
 // ------------- レート制限 -------------
-// 認証済みならアカウント単位、未認証（localhost 運用）なら IP 単位
-const limiterKey = (req) => req.auth?.user ? `user:${req.auth.user}` : `ip:${req.ip}`;
+// ログイン済みならアカウント単位、未ログインなら IP 単位
+const limiterKey = (req) => actorOf(req) ? `user:${actorOf(req)}` : `ip:${req.ip}`;
 const makeLimiter = (windowMs, limit) => rateLimit({
   windowMs, limit, keyGenerator: limiterKey,
   standardHeaders: "draft-7", legacyHeaders: false,
@@ -167,7 +213,7 @@ app.use(express.json({ limit: "200kb" }));
 function audit(req, event, detail) {
   const line = JSON.stringify({
     at: new Date().toISOString(), event,
-    actor: req.auth?.user || "(anonymous)", ip: req.ip,
+    actor: actorOf(req) || "(anonymous)", ip: req.ip,
     ...detail,
   });
   console.log(`[AUDIT] ${line}`);
@@ -213,6 +259,8 @@ const userTokenFromHeader = (req) => {
 };
 // Bot トークン：画面から入力されたもの（x-bot-token）を優先し、無ければ .env の SLACK_BOT_TOKEN
 const botTokenFromHeader = (req) => req.get("x-bot-token") || "";
+// Slack ログイン時はセッションのトークンのみ使う（ヘッダやボディのトークンは受け付けない）
+const userTokenFor = (req) => OAUTH_ENABLED ? (req.slackSession?.token || "") : userTokenFromHeader(req);
 const tokenError = (code, status = 400) => Object.assign(new Error(code), { data: { error: code }, status });
 function botFor(req) {
   const token = botTokenFromHeader(req);
@@ -290,7 +338,7 @@ app.get("/api/channels", async (req, res, next) => {
 app.get("/api/users", async (req, res, next) => {
   try {
     const mode = (req.query.mode || "bot").toLowerCase();
-    const users = (await getDirectory(mode === "user" ? userTokenFromHeader(req) : "", botFor(req)?.token))
+    const users = (await getDirectory(mode === "user" ? userTokenFor(req) : "", botFor(req)?.token))
       .filter(u => !u.deleted && !u.is_bot)
       .map(u => ({ id:u.id, name: u.profile?.real_name || u.name || u.id }));
     safeJson(res, users);
@@ -303,7 +351,7 @@ app.get("/api/channel-members", async (req, res, next) => {
     const { channel } = req.query;
     const mode = (req.query.mode || "bot").toLowerCase();
     const teamId = pickTeamIdFallback(req.query.teamId);
-    const userToken = userTokenFromHeader(req);
+    const userToken = userTokenFor(req);
 
     const b = mode === "user" ? null : botFor(req);
     const client = mode === "user" ? (userToken ? new WebClient(userToken) : null) : b?.client;
@@ -345,7 +393,7 @@ app.post("/api/bot/verify", verifyLimiter, async (req, res, next) => {
 // ------------- API: 個人トークン検証 -------------
 app.post("/api/personal/verify", verifyLimiter, async (req, res, next) => {
   try {
-    const userToken = req.body?.userToken;
+    const userToken = OAUTH_ENABLED ? req.slackSession.token : req.body?.userToken;
     const teamId = pickTeamIdFallback(req.body?.teamId);
     if (!userToken) return safeJson(res, { ok:false, error:"token_required" }, 400);
     if (!isToken(userToken)) return safeJson(res, { ok:false, error:"invalid_auth" }, 400);
@@ -413,8 +461,9 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
       autoJoinPublic = false,
       perChannelMentions = {},   // { chId: { mode:"channel"|"user", users?:[] } }
       mode = "bot",
-      userToken, teamId
+      teamId
     } = req.body || {};
+    const userToken = OAUTH_ENABLED ? req.slackSession.token : req.body?.userToken;
 
     if (typeof message !== "string" || !message || message.length > MAX_TEXT_LEN
         || (summary != null && (typeof summary !== "string" || summary.length > MAX_TEXT_LEN))
@@ -483,7 +532,7 @@ app.post("/api/broadcast", sendLimiter, async (req, res, next) => {
 
     const broadcastId = `b${crypto.randomUUID()}`;
     broadcasts.set(broadcastId, {
-      actor: req.auth?.user,
+      actor: actorOf(req),
       mode: isBot ? "bot" : "user",
       userId: senderUserId,
       results: sent
@@ -508,13 +557,13 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
     const target = typeof broadcastId === "string" ? broadcasts.get(broadcastId) : undefined;
     if (!target?.results?.length)
       return res.status(400).json({ ok: false, error: "no_last_broadcast" });
-    if (target.actor !== req.auth?.user)
+    if (target.actor !== actorOf(req))
       return res.status(403).json({ ok:false, error:"not_owner" });
 
     // 送信時と同じ主体のトークンでのみ取り消し可能
     let client;
     if (target.mode === "user") {
-      const userToken = userTokenFromHeader(req);
+      const userToken = userTokenFor(req);
       if (!userToken) return res.status(401).json({ ok:false, error:"token_required" });
       client = new WebClient(userToken);
     } else {
@@ -577,6 +626,77 @@ app.post("/api/broadcast/undo-last", sendLimiter, async (req, res, next) => {
     res.json({ ok: results.every(r => r.ok), results });
   } catch (e) {
     next(e);
+  }
+});
+
+// ------------- Slack でログイン（OAuth） -------------
+const authLimiter = makeLimiter(60 * 1000, 20);
+const redirectUri = (req) => `${PUBLIC_URL || `${req.protocol}://${req.get("host")}`}/auth/slack/callback`;
+// ログイン失敗時は理由のコードだけを付けて画面に戻す
+const loginFailed = (res, code) => res.redirect(303, `/?login_error=${encodeURIComponent(code)}`);
+
+app.get("/api/session", (req, res) => {
+  const s = req.slackSession;
+  safeJson(res, {
+    ok:true, oauth: OAUTH_ENABLED, serverBot: !!bot,
+    user: s ? { id: s.uid, name: s.name, team: s.teamName } : null,
+  });
+});
+
+app.post("/api/session/logout", (req, res) => {
+  if (req.slackSession) audit(req, "logout", { slackUserId: req.slackSession.uid });
+  res.append("Set-Cookie", cookieHeader(SESSION_COOKIE, "", cookieOpts(req, 0, "/")));
+  safeJson(res, { ok:true });
+});
+
+app.get("/auth/slack/login", authLimiter, (req, res) => {
+  if (!OAUTH_ENABLED) return res.status(404).send("Slack ログインは設定されていません");
+  const state = crypto.randomBytes(32).toString("base64url");
+  res.append("Set-Cookie", cookieHeader(STATE_COOKIE, state, cookieOpts(req, 10 * 60 * 1000, "/auth/slack")));
+  const params = new URLSearchParams({
+    client_id: SLACK_CLIENT_ID, user_scope: USER_SCOPES.join(","),
+    redirect_uri: redirectUri(req), state,
+    // ワークスペースが1つに決まっていれば Slack 側で選択済みにする（Enterprise Grid の E... は除く）
+    ...(ALLOWED_TEAM_IDS.length === 1 && ALLOWED_TEAM_IDS[0].startsWith("T") ? { team: ALLOWED_TEAM_IDS[0] } : {}),
+  });
+  res.redirect(302, `https://slack.com/oauth/v2/authorize?${params}`);
+});
+
+app.get("/auth/slack/callback", authLimiter, async (req, res) => {
+  if (!OAUTH_ENABLED) return res.status(404).send("Slack ログインは設定されていません");
+  const expected = parseCookies(req.get("cookie"))[STATE_COOKIE];
+  res.append("Set-Cookie", cookieHeader(STATE_COOKIE, "", cookieOpts(req, 0, "/auth/slack")));
+  const { code, state, error } = req.query;
+  // CSRF 対策：ログイン開始時に発行した state と一致しなければ拒否
+  if (!expected || typeof state !== "string" || !safeEqual(state, expected)) return loginFailed(res, "invalid_state");
+  if (error) return loginFailed(res, error === "access_denied" ? "access_denied" : "oauth_error");
+  if (typeof code !== "string" || !code) return loginFailed(res, "oauth_error");
+  try {
+    const r = await new WebClient().oauth.v2.access({
+      client_id: SLACK_CLIENT_ID, client_secret: SLACK_CLIENT_SECRET, code, redirect_uri: redirectUri(req),
+    });
+    const token = r.authed_user?.access_token;
+    if (!isToken(token)) return loginFailed(res, "oauth_error");
+    const teamIds = [r.team?.id, r.enterprise?.id].filter(Boolean);
+    if (ALLOWED_TEAM_IDS.length && !teamIds.some(id => ALLOWED_TEAM_IDS.includes(id))) {
+      audit(req, "login_rejected", { reason: "team_not_allowed", teamIds });
+      return loginFailed(res, "team_not_allowed");
+    }
+    const granted = new Set((r.authed_user.scope || "").split(","));
+    if (!USER_SCOPES.every(sc => granted.has(sc))) return loginFailed(res, "missing_scope");
+    const auth = await new WebClient(token).auth.test();
+    if (auth.user_id !== r.authed_user.id) return loginFailed(res, "oauth_error");
+
+    // トークンローテーション有効時は期限が短いので、期限が来たら再ログインしてもらう
+    const ttl = Math.min(SESSION_TTL_MS, r.authed_user.expires_in ? r.authed_user.expires_in * 1000 : Infinity);
+    const session = { uid: auth.user_id, name: auth.user, team: r.team?.id, teamName: r.team?.name || "", token, exp: Date.now() + ttl };
+    res.append("Set-Cookie", cookieHeader(SESSION_COOKIE, seal(SESSION_KEY, session), cookieOpts(req, ttl, "/")));
+    req.slackSession = session;
+    audit(req, "login", { slackUserId: auth.user_id, teamIds });
+    res.redirect(303, "/");
+  } catch (e) {
+    logError("Slack ログインに失敗", e);
+    loginFailed(res, errCode(e) === "invalid_code" ? "invalid_code" : "oauth_error");
   }
 });
 

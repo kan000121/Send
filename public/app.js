@@ -12,6 +12,7 @@ const userTokenRow = $("userTokenRow"), userTokenInput = $("userToken"), teamIdI
 const verifyBtn = $("verifyBtn"), verifyNote = $("verifyNote");
 const botTokenRow = $("botTokenRow"), botTokenInput = $("botToken");
 const botVerifyBtn = $("botVerifyBtn"), botVerifyNote = $("botVerifyNote");
+const loginRow = $("loginRow"), loginOut = $("loginOut"), loginIn = $("loginIn"), loginNote = $("loginNote");
 
 const MAX_TEXT_LEN = 40000;
 const LS_SELECTED_CH = "selectedChannels_onlyChannelOrUsers";
@@ -22,9 +23,12 @@ const LS_PLAN = "perChannelMentions_onlyChannelOrUsers";
 let allChannels = [];
 let allUsers = [];
 let allUsersMap = new Map();
-let channelsLoading = false, usersLoading = true;
+let channelsLoading = false, usersLoading = false;
 let channelsError = "", usersError = "";
 let personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
+// Slack でログイン：oauth が true ならトークンはサーバー側（暗号化 Cookie）にあり、画面では扱わない
+let session = { oauth:false, user:null, serverBot:false };
+const loggedOut = () => session.oauth && !session.user;
 // token が空なら、サーバーの .env に設定された Bot トークンを使っている
 let botAuth = { ok:false, bot:null, token:"", fromServer:false };
 let botChecking = false;
@@ -40,7 +44,8 @@ let busy = false;
 const getMode = () => modeRadios.find(r => r.checked)?.value || "user";
 
 // API 呼び出しは必ず CSRF 対策ヘッダを付与する
-const api = (url, opts = {}) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Requested-With": "send" } });
+const api = (url, opts = {}) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Requested-With": "send" } })
+  .then(r => { if (r.status === 401 && session.user) onSessionExpired(); return r; });
 const robustJsonResponse = (r) => r.text().then(raw => {
   if ((r.headers.get("content-type") || "").toLowerCase().includes("application/json")) {
     try { return JSON.parse(raw); } catch {}
@@ -55,6 +60,12 @@ const ERROR_TEXT = {
   is_archived: "アーカイブ済みのチャンネルです",
   restricted_action: "このチャンネルへの投稿が制限されています",
   invalid_auth: "トークンが無効です",
+  login_required: "ログインしていないか、ログインの有効期限が切れています。「Slack でログイン」してください",
+  invalid_state: "ログインをやり直してください（ログイン画面を開いたまま時間が経った可能性があります）",
+  invalid_code: "ログインの有効期限が切れました。もう一度お試しください",
+  access_denied: "Slack の画面でキャンセルされました",
+  team_not_allowed: "このワークスペースのアカウントではログインできません",
+  oauth_error: "Slack でのログインに失敗しました。しばらくしてから再度お試しください",
   not_authed: "トークンが指定されていません",
   token_revoked: "トークンが失効しています",
   account_inactive: "アカウントが無効化されています",
@@ -107,6 +118,7 @@ const emptyState = (text, loading = false) =>
   el("div", { class:"empty" }, loading ? el("span", { class:"spinner", "aria-hidden":"true" }) : null, text);
 // 一覧の取得失敗を、原因（Slack のエラーコード）付きで一覧内に表示する
 const LOAD_ERROR_HINT = {
+  login_required: "上の「Slack でログイン」からログインしてください。",
   no_token: "上で個人トークンまたは Bot トークンを入力して「確認」してください。",
   missing_scope: "トークン（個人トークンまたは Bot）に users:read / channels:read などのスコープを追加し、Slack アプリを再インストールしてください。",
   invalid_auth: "トークンが正しいか確認してください。",
@@ -174,8 +186,12 @@ function updateCounts() {
 // ---------- チャンネル一覧 ----------
 function renderChannels() {
   const mode = getMode();
+  if (loggedOut()) {
+    listEl.replaceChildren(emptyState("「Slack でログイン」すると、チャンネルが表示されます"));
+    return updateCounts();
+  }
   if (mode === "user" && !personal.ok) {
-    listEl.replaceChildren(emptyState("上の「確認」でトークンを確認すると、参加中のチャンネルが表示されます"));
+    listEl.replaceChildren(emptyState(session.oauth ? "参加中のチャンネルを読み込み中…" : "上の「確認」でトークンを確認すると、参加中のチャンネルが表示されます", session.oauth));
     return updateCounts();
   }
   if (mode === "bot" && (botChecking || channelsLoading)) {
@@ -366,6 +382,8 @@ let usersRequestSeq = 0;
 async function loadUsers() {
   const seq = ++usersRequestSeq;
   const useToken = getMode() === "user" && personal.ok;
+  // 送信者の確認が済むまでは取得しない（確認が終わるとここが再度呼ばれる）
+  if (loggedOut() || (!useToken && !botAuth.ok)) { usersLoading = false; usersError = ""; allUsers = []; return renderUsers(); }
   usersLoading = true; usersError = "";
   renderUsers();
   let list, error = "";
@@ -389,7 +407,14 @@ async function loadUsers() {
   renderUsers();
 }
 function renderUsers() {
+  if (loggedOut()) { usersEl.replaceChildren(emptyState("「Slack でログイン」すると、ユーザーが表示されます")); return updateCounts(); }
   if (usersLoading) { usersEl.replaceChildren(emptyState("読み込み中…", true)); return updateCounts(); }
+  if (!usersError && !allUsers.length && !(getMode() === "user" ? personal.ok : botAuth.ok)) {
+    usersEl.replaceChildren(emptyState(getMode() === "user"
+      ? (session.oauth ? "送信者の確認が済むと、ユーザーが表示されます" : "上の「確認」でトークンを確認すると、ユーザーが表示されます")
+      : "Bot トークンを「確認」すると、ユーザーが表示されます"));
+    return updateCounts();
+  }
   if (usersError) { usersEl.replaceChildren(loadErrorState("ユーザー一覧", usersError)); return updateCounts(); }
   if (!allUsers.length) { usersEl.replaceChildren(emptyState("表示できるユーザーがいません")); return updateCounts(); }
   const q = userFilter.value.trim().toLowerCase();
@@ -436,8 +461,8 @@ async function loadChannelsBot() {
 
 function applyMode() {
   const user = getMode() === "user";
-  userTokenRow.hidden = !user;
-  botTokenRow.hidden = user;
+  userTokenRow.hidden = !user || session.oauth;
+  botTokenRow.hidden = user || loggedOut();
   $("autoJoinRow").hidden = user;
   renderChannels();
 }
@@ -451,6 +476,7 @@ function setBotNote(text, type = "") {
 
 // auto: ページ表示時の自動確認（サーバーに Bot トークンが無くてもエラー表示にしない）
 async function verifyBot({ auto = false } = {}) {
+  if (loggedOut()) return;
   const token = botTokenInput.value.trim();
   botChecking = true;
   botVerifyBtn.disabled = true;
@@ -496,21 +522,23 @@ botTokenInput.addEventListener("input", () => {
 });
 
 function setVerifyNote(text, type = "") {
-  verifyNote.textContent = text;
-  verifyNote.className = `note ${type}`;
+  const note = session.oauth ? loginNote : verifyNote;
+  note.textContent = text;
+  note.className = `note ${type}`;
 }
 
+// Slack ログイン時はトークンを送らず、サーバーがセッションのトークンで確認する
 async function verifyToken() {
-  const userToken = userTokenInput.value.trim();
-  const teamId = teamIdInput.value.trim();
-  if (!userToken) { setVerifyNote("トークンを入力してください。", "err"); userTokenInput.focus(); return; }
+  const userToken = session.oauth ? "" : userTokenInput.value.trim();
+  const teamId = session.oauth ? "" : teamIdInput.value.trim();
+  if (!session.oauth && !userToken) { setVerifyNote("トークンを入力してください。", "err"); userTokenInput.focus(); return; }
   verifyBtn.disabled = true;
   verifyBtn.replaceChildren(el("span", { class:"spinner", "aria-hidden":"true" }), "確認中");
   setVerifyNote("");
   try {
     const r = await api("/api/personal/verify", {
       method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ userToken, teamId })
+      body: JSON.stringify(session.oauth ? {} : { userToken, teamId })
     });
     const j = await robustJsonResponse(r);
     if (j.ok) {
@@ -518,7 +546,7 @@ async function verifyToken() {
       channelMembersCache.clear();
       loadUsers();
       setVerifyNote(`✓ ${j.user.name}（${j.user.id}）として送信できます。参加中のチャンネル ${j.memberChannels.length}件`, "ok");
-      try { localStorage.setItem("teamId", teamId); } catch {}
+      if (!session.oauth) try { localStorage.setItem("teamId", teamId); } catch {}
     } else {
       personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
       setVerifyNote(`確認できませんでした：${errText(j.error)}`, "err");
@@ -540,6 +568,52 @@ userTokenInput.addEventListener("input", () => {
     renderChannels();
   }
 });
+
+// ---------- Slack でログイン ----------
+function renderLogin() {
+  loginRow.hidden = !session.oauth;
+  loginOut.hidden = !!session.user;
+  loginIn.hidden = !session.user;
+  $("loginName").textContent = session.user?.name || "";
+  $("loginTeam").textContent = session.user?.team ? `（${session.user.team}）` : "";
+  if (!session.user) setVerifyNote("");
+}
+async function loadSession() {
+  try {
+    const j = await robustJsonResponse(await api("/api/session"));
+    session = j.ok ? { oauth: !!j.oauth, user: j.user || null, serverBot: !!j.serverBot } : { oauth:false, user:null, serverBot:false };
+  } catch {
+    session = { oauth:false, user:null, serverBot:false };
+  }
+}
+function resetAuthState() {
+  personal = { ok:false, user:null, memberChannels:[], publicChannels:[], token:"", teamId:"" };
+  botAuth = { ok:false, bot:null, token:"", fromServer:false };
+  allChannels = []; allUsers = []; allUsersMap = new Map();
+  channelMembersCache.clear();
+  setBotNote("");
+  renderLogin(); applyMode(); renderUsers();
+}
+function onSessionExpired() {
+  session.user = null;
+  resetAuthState();
+  toast(errText("login_required"), "err");
+}
+$("logoutBtn").addEventListener("click", async () => {
+  try { await api("/api/session/logout", { method:"POST" }); } catch {}
+  session.user = null;
+  lastBroadcast = null; undoBtn.disabled = true;
+  resetAuthState();
+  toast("ログアウトしました");
+});
+// ログイン失敗時はサーバーが ?login_error=コード を付けて戻す
+function showLoginError() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get("login_error");
+  if (!code) return;
+  history.replaceState(null, "", location.pathname);
+  toast(`ログインできませんでした：${errText(code)}`, "err");
+}
 
 // ---------- 本文 ----------
 messageEl.addEventListener("input", () => {
@@ -637,6 +711,7 @@ function validate({ message, channelIds, userIds }) {
   }
   if (!channelIds.length && !userIds.length) {
     const needsAuth = getMode() === "user" ? !personal.ok : !botAuth.ok;
+    if (loggedOut()) { toast("先に「Slack でログイン」してください。", "err"); return false; }
     toast(needsAuth
       ? `先に${getMode() === "user" ? "ユーザー" : "Bot "}トークンを「確認」して、宛先を選択してください。`
       : "宛先を1件以上選択してください。", "err");
@@ -705,7 +780,7 @@ confirmSendBtn.addEventListener("click", async () => {
     perChannelMentions: Object.fromEntries(p.channelIds.map(id => [id, planFor(id)])),
     mode: getMode()
   };
-  if (getMode() === "user" && personal.ok) {
+  if (getMode() === "user" && personal.token) {
     body.userToken = personal.token; if (personal.teamId) body.teamId = personal.teamId;
   }
 
@@ -804,15 +879,19 @@ function renderResults(title, rows, raw) {
 }
 
 // ---------- init ----------
-(function init() {
+(async function init() {
   loadPlans();
   loadSelectedChannels();
   try {
     localStorage.removeItem("xoxp");
     teamIdInput.value = localStorage.getItem("teamId") || "";
   } catch {}
+  showLoginError();
+  await loadSession();
+  renderLogin();
   applyMode();
   renderUsers();
-  verifyBot({ auto:true }); // サーバーに Bot トークンがあればそのまま使える
-  loadUsers();
+  if (loggedOut()) return;
+  if (session.user) verifyToken(); // ログイン済みなら参加中のチャンネルをそのまま読み込む
+  if (session.serverBot) verifyBot({ auto:true }); // サーバーに Bot トークンがあればそのまま使える
 })();

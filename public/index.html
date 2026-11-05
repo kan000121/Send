@@ -79,6 +79,12 @@
   .token-row.bot { grid-template-columns:1fr auto; }
   @media (max-width:720px) { .token-row, .token-row.bot { grid-template-columns:1fr; } }
   .note { margin:10px 0 0; font-size:14px; }
+  .note:empty { display:none; }
+  .login-row { margin:0 0 16px; padding:12px 14px; border:1px solid var(--border); border-radius:10px; background:var(--surface-2); }
+  .login-state { display:flex; align-items:center; gap:8px 12px; flex-wrap:wrap; }
+  .login-state .btn-secondary { margin-left:auto; }
+  .btn-link { display:inline-block; text-decoration:none; border-radius:8px; padding:9px 16px; font-weight:600; }
+  .signed-in { display:inline-grid; place-items:center; width:22px; height:22px; border-radius:50%; background:var(--ok-soft); color:var(--ok); font-size:13px; font-weight:700; flex:none; }
   .note.ok { color:var(--ok); } .note.err { color:var(--danger); }
 
   /* destinations */
@@ -240,6 +246,18 @@
   <!-- 1. 送信者 -->
   <section class="card" aria-labelledby="h-sender">
     <h2 id="h-sender"><span class="step">1</span>送信者</h2>
+    <div id="loginRow" class="login-row" hidden>
+      <div id="loginOut" class="login-state">
+        <a class="btn-primary btn-link" href="/auth/slack/login">Slack でログイン</a>
+        <span class="muted">Slack の画面で「許可する」を押すと、この画面に戻ってきます。<button type="button" class="link" data-help="2">ログインについて</button></span>
+      </div>
+      <div id="loginIn" class="login-state" hidden>
+        <span class="signed-in" aria-hidden="true">✓</span>
+        <span><strong id="loginName"></strong> としてログイン中 <span id="loginTeam" class="muted"></span></span>
+        <button id="logoutBtn" type="button" class="btn-secondary">ログアウト</button>
+      </div>
+      <p id="loginNote" class="note" role="status"></p>
+    </div>
     <div class="seg" role="radiogroup" aria-label="送信モード">
       <label><input type="radio" name="senderMode" value="user" checked><span>個人として送信</span></label>
       <label><input type="radio" name="senderMode" value="bot"><span>Bot として送信</span></label>
@@ -446,7 +464,7 @@
             <ul>
               <li>あなたの名前とアイコンで投稿されます</li>
               <li>送れるのは、あなたが参加しているチャンネル</li>
-              <li><strong>ユーザートークン</strong>（<code>xoxp-</code> で始まる）が必要です</li>
+              <li><strong>Slack でログイン</strong>するだけで使えます</li>
             </ul>
           </div>
           <div>
@@ -454,29 +472,30 @@
             <ul>
               <li>Bot の名前とアイコンで投稿されます</li>
               <li>送れるのは、Bot が参加しているチャンネル</li>
-              <li>管理者がサーバーに設定済みなら、トークンの入力は不要です</li>
+              <li>ログインに加えて、<strong>Bot トークン</strong>（<code>xoxb-</code> で始まる）の入力が必要です</li>
             </ul>
           </div>
         </div>
       </section>
 
       <section class="slide" hidden>
-        <h3>ユーザートークンの入手方法</h3>
+        <h3>Slack でログインする</h3>
         <ol class="steps-list">
-          <li><span>ブラウザで <code>https://api.slack.com/apps</code> を開き、社内の送信用アプリを選びます。<span class="muted">どのアプリか分からない場合は、管理者に確認してください。</span></span></li>
-          <li><span>左のメニューから <span class="ui">OAuth &amp; Permissions</span> を開きます。</span></li>
-          <li><span><span class="ui">User OAuth Token</span>（<code>xoxp-</code> で始まる文字列）の <span class="ui">Copy</span> を押します。<span class="muted">トークンが表示されていない場合は、先に <span class="ui">Install to Workspace</span> を押してください。</span></span></li>
-          <li><span>この画面の「ユーザートークン」欄に貼り付けて <span class="ui">確認</span> を押します。「✓ ○○として送信できます」と表示されれば準備完了です。</span></li>
+          <li><span>画面上部の <span class="ui">Slack でログイン</span> を押します。</span></li>
+          <li><span>Slack の画面に移ります。右上のワークスペース名が社内のものになっていることを確認して、<span class="ui">許可する</span> を押します。<span class="muted">Slack にログインしていない場合は、先に Slack のログイン画面が出ます。</span></span></li>
+          <li><span>この画面に戻り、「✓ ○○ としてログイン中」と表示されれば準備完了です。参加中のチャンネルが自動で読み込まれます。</span></li>
         </ol>
-        <div class="alert warn">トークンはパスワードと同じです。チャットやメールで他の人に共有しないでください。</div>
-        <p class="hint">team_id は通常空欄で構いません。複数のワークスペースを使う Enterprise Grid の場合のみ、管理者に確認してください。トークンはサーバーに保存されないため、ページを再読み込みしたら再入力が必要です。</p>
+        <ul>
+          <li>ログインは <strong>7日間</strong> 有効です。期限が切れたら、もう一度 <span class="ui">Slack でログイン</span> を押してください。</li>
+          <li>共用の PC では、使い終わったら <span class="ui">ログアウト</span> を押してください。</li>
+          <li>「管理者の承認が必要です」と表示された場合は、Slack の管理者に承認を依頼してください（初回のみ）。</li>
+        </ul>
       </section>
 
       <section class="slide" hidden>
         <h3>Bot として送る場合</h3>
         <ul>
-          <li>管理者がサーバーに Bot トークンを設定している場合は、<span class="ui">Bot として送信</span> を選ぶだけで使えます（「✓ Bot ○○ で送信できます」と表示されます）。</li>
-          <li>自分で入力する場合は、前のページと同じ <span class="ui">OAuth &amp; Permissions</span> にある <span class="ui">Bot User OAuth Token</span>（<code>xoxb-</code> で始まる）を貼り付けて <span class="ui">確認</span> を押します。</li>
+          <li>Bot トークンは、<code>https://api.slack.com/apps</code> で社内の送信用アプリを開き、<span class="ui">OAuth &amp; Permissions</span> にある <span class="ui">Bot User OAuth Token</span>（<code>xoxb-</code> で始まる）をコピーして貼り付け、<span class="ui">確認</span> を押します。<span class="muted">分からない場合は管理者に確認してください。</span></li>
           <li>公開チャンネルは、宛先の下にある「Bot が自動で参加する」をオンにすれば、Bot が未参加でも送れます。</li>
           <li>非公開チャンネルに送るには、そのチャンネルで <code>/invite @Bot名</code> を実行して Bot を招待しておいてください。</li>
         </ul>
@@ -529,7 +548,8 @@
         <p><strong>失敗したときのよくある原因</strong></p>
         <ul>
           <li>「チャンネルに参加していません」：チャンネルに参加するか、Bot を招待してください。</li>
-          <li>「トークンが無効です」「失効しています」：トークンを入手し直して、もう一度 <span class="ui">確認</span> してください。</li>
+          <li>「ログインしていないか、有効期限が切れています」：もう一度 <span class="ui">Slack でログイン</span> を押してください。</li>
+          <li>「トークンが無効です」「失効しています」（Bot 送信時）：Bot トークンを入手し直して、もう一度 <span class="ui">確認</span> してください。</li>
           <li>「権限（スコープ）が不足しています」：アプリの設定が必要です。管理者に連絡してください。</li>
         </ul>
       </section>
@@ -541,7 +561,7 @@
           <li>スレッドに付けた案件概要も一緒に削除されます。他の人が付けた返信は残ります。</li>
           <li>一部の削除に失敗した場合は、もう一度押すと残りを再試行します。</li>
         </ul>
-        <div class="alert warn">取り消せるのは、同じトークンで送った直前の 1 回だけです。サーバーが再起動すると取り消せなくなるため、間違いに気づいたらすぐに取り消してください。</div>
+        <div class="alert warn">取り消せるのは、同じアカウントで送った直前の 1 回だけです。サーバーが再起動すると取り消せなくなるため、間違いに気づいたらすぐに取り消してください。</div>
       </section>
     </div>
     <footer class="help-nav">
