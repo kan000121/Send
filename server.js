@@ -277,6 +277,7 @@ function botFor(req) {
 const DIRECTORY_TTL_MS = 5 * 60 * 1000;
 const directoryCache = new Map(); // sha256(token) -> { at, users }
 const directoryLoading = new Map(); // sha256(token) -> Promise
+const tokenKey = (token) => crypto.createHash("sha256").update(token).digest("hex");
 async function fetchDirectory(client) {
   const users = [];
   let cursor;
@@ -288,7 +289,7 @@ async function fetchDirectory(client) {
   return users;
 }
 async function getTokenDirectory(token) {
-  const key = crypto.createHash("sha256").update(token).digest("hex");
+  const key = tokenKey(token);
   const hit = directoryCache.get(key);
   if (hit && Date.now() - hit.at < DIRECTORY_TTL_MS) return hit.users;
   if (!directoryLoading.has(key)) {
@@ -314,6 +315,34 @@ async function getDirectory(userToken, botToken) {
 }
 const displayName = (u) =>
   u.profile?.real_name?.trim() || u.profile?.display_name?.trim() || u.name || u.id;
+
+// 名簿（users.list）に載らない社外ユーザー（Slack Connect の参加者など）は users.info で個別に引く
+// 引けなかった ID は結果に含めない（呼び出し側で ID を表示）。429 は待たずに諦めて一覧の表示を優先する
+const EXTERNAL_LOOKUP_CONCURRENCY = 5;
+const externalNameCache = new Map(); // sha256(token):userId -> { at, name }
+async function lookupExternalNames(ids, tokens) {
+  const names = new Map();
+  for (const token of tokens) {
+    const pending = ids.filter(id => !names.has(id));
+    if (!pending.length) break;
+    const key = tokenKey(token);
+    const client = new WebClient(token, { maxRequestConcurrency: EXTERNAL_LOOKUP_CONCURRENCY, rejectRateLimitedCalls: true });
+    await Promise.all(pending.map(async (id) => {
+      const cacheKey = `${key}:${id}`;
+      const hit = externalNameCache.get(cacheKey);
+      if (hit && Date.now() - hit.at < DIRECTORY_TTL_MS) return names.set(id, hit.name);
+      try {
+        const { user } = await client.users.info({ user: id });
+        if (!user) return;
+        const name = displayName(user);
+        names.set(id, name);
+        externalNameCache.set(cacheKey, { at: Date.now(), name });
+        while (externalNameCache.size > 5000) externalNameCache.delete(externalNameCache.keys().next().value);
+      } catch {}
+    }));
+  }
+  return names;
+}
 
 // ------------- API: チャンネル一覧（bot視点） -------------
 app.get("/api/channels", async (req, res, next) => {
@@ -369,9 +398,13 @@ app.get("/api/channel-members", async (req, res, next) => {
 
     // 名前解決：メンバーごとの users.info ではなく名簿を一括取得して引く
     // 名簿が取れなくてもメンバー一覧は返す（名前の代わりに ID を表示）
-    const directory = await getDirectory(mode === "user" ? userToken : "", b?.token).catch(() => []);
+    const tokens = [mode === "user" ? userToken : "", b?.token].filter(Boolean);
+    const directory = await getDirectory(...tokens).catch(() => []);
     const names = new Map(directory.map(u => [u.id, displayName(u)]));
-    safeJson(res, ids.map(uid => ({ id: uid, name: names.get(uid) || uid })));
+    // 名簿に無いメンバー（社外ユーザー）だけ個別に引く。名簿自体が取れないときは全員分の問い合わせになるので行わない
+    const missing = directory.length ? ids.filter(uid => !names.has(uid)) : [];
+    const external = await lookupExternalNames(missing, tokens);
+    safeJson(res, ids.map(uid => ({ id: uid, name: names.get(uid) || external.get(uid) || uid })));
   } catch (e) { next(e); }
 });
 
